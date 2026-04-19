@@ -38,6 +38,15 @@ def adapter(runner):
 
 
 @pytest.mark.asyncio
+async def test_autonomy_seed_command_works_in_telegram(adapter):
+    send = await send_and_capture(adapter, '/autonomy-seed', Platform.TELEGRAM)
+    send.assert_called_once()
+    response_text = send.call_args[1].get('content') or send.call_args[0][1]
+    assert 'Seeded repo-health autonomy goal/policy for code_projects.' in response_text
+    assert 'run /autonomy-run' in response_text
+
+
+@pytest.mark.asyncio
 async def test_reviews_command_returns_autonomy_cards(adapter, monkeypatch):
     monkeypatch.setattr(
         'gateway.autonomy_review.list_reviews',
