@@ -221,8 +221,16 @@ def resolve_command(name: str) -> CommandDef | None:
     """Resolve a command name or alias to its CommandDef.
 
     Accepts names with or without the leading slash.
+    Also accepts Telegram-safe underscore variants for hyphenated commands,
+    e.g. ``/autonomy_seed`` -> ``autonomy-seed``.
     """
-    return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
+    normalized = name.lower().lstrip("/")
+    cmd = _COMMAND_LOOKUP.get(normalized)
+    if cmd is not None:
+        return cmd
+    if "_" in normalized:
+        return _COMMAND_LOOKUP.get(normalized.replace("_", "-"))
+    return None
 
 
 def _build_description(cmd: CommandDef) -> str:
