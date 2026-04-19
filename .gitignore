@@ -58,3 +58,6 @@ mini-swe-agent/
 # Nix
 .direnv/
 result
+
+# Codex hook runtime state
+.codex/hooks/.state/

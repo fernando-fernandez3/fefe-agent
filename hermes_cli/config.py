@@ -590,6 +590,20 @@ DEFAULT_CONFIG = {
         "wrap_response": True,
     },
 
+    "autonomy": {
+        "enabled": False,
+        "tick_interval_minutes": 15,
+        "allowed_domains": ["code_projects"],
+        "telegram_reviews_enabled": True,
+    },
+
+    "autoworkflow_review": {
+        "enabled": False,
+        "base_url": "http://127.0.0.1:8882",
+        "api_token": "",
+        "digest_limit": 5,
+    },
+
     # Logging — controls file logging to ~/.hermes/logs/.
     # agent.log captures INFO+ (all agent activity); errors.log captures WARNING+.
     "logging": {
@@ -599,7 +613,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 13,
+    "_config_version": 15,
 }
 
 # =============================================================================
