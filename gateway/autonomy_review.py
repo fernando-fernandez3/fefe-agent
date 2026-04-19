@@ -36,17 +36,21 @@ def list_reviews(limit: int = 5) -> list[dict]:
 def render_review_cards(items: list[dict]) -> str:
     if not items:
         return 'No pending autonomy reviews.'
-    lines = ['Autonomy review queue:']
-    for item in items:
-        lines.append(f"#{item['id']} {item['title']}")
+    lines = [f'Autonomy review queue, {len(items)} pending:']
+    for index, item in enumerate(items, start=1):
+        review_id = item['id']
+        lines.append(f"{index}. {item['title']}")
+        lines.append(f"   ID: {review_id}")
         if item.get('summary'):
-            lines.append(f"Why: {item['summary']}")
+            lines.append(f"   Why: {item['summary']}")
         if item.get('proposed_action'):
-            lines.append(f"Action: {item['proposed_action']}")
+            lines.append(f"   Action: {item['proposed_action']}")
         if item.get('approval_effect'):
-            lines.append(f"If approved: {item['approval_effect']}")
+            lines.append(f"   If approved: {item['approval_effect']}")
+        lines.append(f"   Approve: /review-approve {review_id}")
+        lines.append(f"   Reject: /review-reject {review_id} why")
         lines.append('')
-    lines.append('Reply: /review-approve <id> or /review-reject <id> why')
+    lines.append('Tip: run /reviews again after you approve or reject to refresh the queue.')
     return '\n'.join(lines)
 
 
@@ -57,7 +61,11 @@ def format_review_notification(review_id: str) -> str:
         review = store.get_review(review_id)
         execution = store.get_execution(review.execution_id)
         packet = formatter.format(review=review, execution=execution)
-        return packet.as_text()
+        return (
+            f"{packet.as_text()}\n\n"
+            f"Approve: /review-approve {review_id}\n"
+            f"Reject: /review-reject {review_id} why"
+        )
     finally:
         store.close()
 

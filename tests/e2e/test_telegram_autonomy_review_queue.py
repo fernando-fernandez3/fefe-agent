@@ -55,9 +55,10 @@ async def test_reviews_command_returns_autonomy_cards(adapter, monkeypatch):
     send = await send_and_capture(adapter, '/reviews', Platform.TELEGRAM)
     send.assert_called_once()
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
-    assert 'Autonomy review queue:' in response_text
-    assert 'review_12' in response_text
-    assert '/review-approve <id>' in response_text
+    assert 'Autonomy review queue, 1 pending:' in response_text
+    assert 'ID: review_12' in response_text
+    assert 'Approve: /review-approve review_12' in response_text
+    assert 'Reject: /review-reject review_12 why' in response_text
 
 
 @pytest.mark.asyncio
@@ -77,6 +78,7 @@ async def test_review_approve_command_executes_autonomy_work(adapter, monkeypatc
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'approved review_12' in response_text
     assert 'exec_12' in response_text
+    assert 'Run /reviews to refresh the queue.' in response_text
 
 
 @pytest.mark.asyncio
@@ -95,6 +97,7 @@ async def test_review_reject_command_cancels_autonomy_work(adapter, monkeypatch)
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'rejected review_12' in response_text
     assert 'too risky' in response_text
+    assert 'Run /reviews to refresh the queue.' in response_text
 
 
 @pytest.mark.asyncio
@@ -115,7 +118,7 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
             )
 
     monkeypatch.setattr(runner, '_build_gateway_autonomy_execution_loop', lambda store, source=None: FakeLoop())
-    monkeypatch.setattr('gateway.autonomy_review.format_review_notification', lambda review_id: f'notification for {review_id}')
+    monkeypatch.setattr('gateway.autonomy_review.format_review_notification', lambda review_id: f'notification for {review_id}\nApprove: /review-approve {review_id}')
 
     send = await send_and_capture(adapter, '/autonomy-run', Platform.TELEGRAM)
     assert send.call_count == 2
@@ -125,6 +128,7 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
     ]
     assert any('Autonomy tick: review_required' in message for message in messages)
     assert any('notification for review_42' in message for message in messages)
+    assert any('/review-approve review_42' in message for message in messages)
 
 
 @pytest.mark.asyncio

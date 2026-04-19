@@ -1007,7 +1007,10 @@ class GatewayRunner:
             result = await asyncio.to_thread(approve_review, review_id)
         except KeyError:
             return f'Autonomy review not found: {review_id}'
-        return f"✓ approved {result['review_id']}, executed {result['execution_id']} via {result['executor_type']}."
+        return (
+            f"✓ approved {result['review_id']}, executed {result['execution_id']} via {result['executor_type']}.\n"
+            "Run /reviews to refresh the queue."
+        )
 
     async def _handle_autonomy_review_reject_command(self, event: MessageEvent) -> str:
         from gateway.autonomy_review import reject_review
@@ -1023,7 +1026,7 @@ class GatewayRunner:
         except KeyError:
             return f'Autonomy review not found: {review_id}'
         suffix = f" Reason: {reason}" if reason else ''
-        return f"✓ rejected {result['review_id']}.{suffix}"
+        return f"✓ rejected {result['review_id']}.{suffix}\nRun /reviews to refresh the queue."
 
 
     def _voice_copilot_prompt(self) -> str:
