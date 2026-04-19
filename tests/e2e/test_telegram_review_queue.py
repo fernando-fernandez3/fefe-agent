@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway.config import Platform
 from tests.e2e.conftest import (
     make_adapter,
     make_session_entry,
@@ -15,22 +16,22 @@ from tests.e2e.conftest import (
 
 @pytest.fixture()
 def source():
-    return make_source()
+    return make_source(Platform.TELEGRAM)
 
 
 @pytest.fixture()
 def session_entry(source):
-    return make_session_entry(source)
+    return make_session_entry(Platform.TELEGRAM, source)
 
 
 @pytest.fixture()
 def runner(session_entry):
-    return make_runner(session_entry)
+    return make_runner(Platform.TELEGRAM, session_entry)
 
 
 @pytest.fixture()
 def adapter(runner):
-    return make_adapter(runner)
+    return make_adapter(Platform.TELEGRAM, runner)
 
 
 @pytest.mark.asyncio
@@ -60,7 +61,7 @@ async def test_review_command_returns_rendered_cards(adapter, monkeypatch):
         ),
     )
 
-    send = await send_and_capture(adapter, "/review")
+    send = await send_and_capture(adapter, "/review", Platform.TELEGRAM)
     send.assert_called_once()
     response_text = send.call_args[1].get("content") or send.call_args[0][1]
     assert "Review queue:" in response_text
@@ -82,7 +83,7 @@ async def test_approve_command_submits_decision(adapter, monkeypatch):
     submit = AsyncMock(return_value={"review_item_id": "ri_12", "status": "approved"})
     monkeypatch.setattr("gateway.autoworkflow_review.submit_review_decision", submit)
 
-    send = await send_and_capture(adapter, "/approve ri_12 looks good")
+    send = await send_and_capture(adapter, "/approve ri_12 looks good", Platform.TELEGRAM)
     send.assert_called_once()
     submit.assert_awaited_once_with(
         "http://autoworkflow.test",
@@ -109,7 +110,7 @@ async def test_reject_raw_text_submits_decision(adapter, monkeypatch):
     submit = AsyncMock(return_value={"review_item_id": "ri_13", "status": "rejected"})
     monkeypatch.setattr("gateway.autoworkflow_review.submit_review_decision", submit)
 
-    send = await send_and_capture(adapter, "reject ri_13 too broad")
+    send = await send_and_capture(adapter, "reject ri_13 too broad", Platform.TELEGRAM)
     send.assert_called_once()
     submit.assert_awaited_once_with(
         "http://autoworkflow.test",
@@ -136,7 +137,7 @@ async def test_edit_command_submits_instruction(adapter, monkeypatch):
     submit = AsyncMock(return_value={"review_item_id": "ri_16", "status": "needs_redraft"})
     monkeypatch.setattr("gateway.autoworkflow_review.submit_review_decision", submit)
 
-    send = await send_and_capture(adapter, "/edit ri_16 focus only on onboarding")
+    send = await send_and_capture(adapter, "/edit ri_16 focus only on onboarding", Platform.TELEGRAM)
     send.assert_called_once()
     submit.assert_awaited_once_with(
         "http://autoworkflow.test",

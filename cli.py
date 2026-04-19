@@ -4164,8 +4164,8 @@ class HermesCLI:
                     policy_id='policy_code_projects',
                     domain='code_projects',
                     trust_level=1,
-                    allowed_actions=['inspect_repo'],
-                    approval_required_for=[],
+                    allowed_actions=['inspect_repo', 'codex_task'],
+                    approval_required_for=['codex_task'],
                     verification_required=True,
                     max_parallelism=1,
                 )

@@ -160,6 +160,43 @@ def test_autonomy_seed_and_run_commands(tmp_path, monkeypatch):
     assert 'Learning:' in output
 
 
+def test_autonomy_seed_and_run_creates_review_for_failing_tests(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-b', 'main'], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=repo, check=True, capture_output=True, text=True)
+    tests_dir = repo / 'tests'
+    tests_dir.mkdir()
+    (tests_dir / 'test_fail.py').write_text('def test_fail():\n    assert False\n')
+    subprocess.run(['git', 'add', 'tests/test_fail.py'], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'initial failing test'], cwd=repo, check=True, capture_output=True, text=True)
+    monkeypatch.setenv('TERMINAL_CWD', str(repo))
+
+    cli_obj = make_cli(tmp_path)
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        assert cli_obj.process_command('/autonomy-seed') is True
+        assert cli_obj.process_command('/autonomy-run') is True
+        assert cli_obj.process_command('/reviews') is True
+
+    output = buffer.getvalue()
+    assert 'Autonomy tick: review_required' in output
+    assert 'Review:' in output
+    assert 'Pending autonomy reviews' in output
+    assert 'policy_requires_review' in output
+    assert 'run Codex inside' in output
+
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    reviews = store.list_pending_reviews(domain='code_projects')
+    assert len(reviews) == 1
+    execution = store.get_execution(reviews[0].execution_id)
+    assert execution.review_required is True
+    assert execution.executor_type == 'review_only'
+    assert execution.plan['proposed_actions'] == ['codex_task']
+    store.close()
+
+
 def test_review_approve_command_executes_linked_work(tmp_path, monkeypatch):
     seed_autonomy_state(tmp_path)
     repo = tmp_path / 'repo'
