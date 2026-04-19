@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gateway.config import Platform
 from tests.e2e.conftest import (
     make_adapter,
     make_session_entry,
@@ -18,22 +19,22 @@ from tests.e2e.conftest import (
 
 @pytest.fixture()
 def source():
-    return make_source()
+    return make_source(Platform.TELEGRAM)
 
 
 @pytest.fixture()
 def session_entry(source):
-    return make_session_entry(source)
+    return make_session_entry(Platform.TELEGRAM, source)
 
 
 @pytest.fixture()
 def runner(session_entry):
-    return make_runner(session_entry)
+    return make_runner(Platform.TELEGRAM, session_entry)
 
 
 @pytest.fixture()
 def adapter(runner):
-    return make_adapter(runner)
+    return make_adapter(Platform.TELEGRAM, runner)
 
 
 @pytest.mark.asyncio
@@ -51,7 +52,7 @@ async def test_reviews_command_returns_autonomy_cards(adapter, monkeypatch):
         ],
     )
 
-    send = await send_and_capture(adapter, '/reviews')
+    send = await send_and_capture(adapter, '/reviews', Platform.TELEGRAM)
     send.assert_called_once()
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'Autonomy review queue:' in response_text
@@ -71,7 +72,7 @@ async def test_review_approve_command_executes_autonomy_work(adapter, monkeypatc
         },
     )
 
-    send = await send_and_capture(adapter, '/review-approve review_12')
+    send = await send_and_capture(adapter, '/review-approve review_12', Platform.TELEGRAM)
     send.assert_called_once()
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'approved review_12' in response_text
@@ -89,7 +90,7 @@ async def test_review_reject_command_cancels_autonomy_work(adapter, monkeypatch)
         },
     )
 
-    send = await send_and_capture(adapter, '/review-reject review_12 too risky')
+    send = await send_and_capture(adapter, '/review-reject review_12 too risky', Platform.TELEGRAM)
     send.assert_called_once()
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'rejected review_12' in response_text
@@ -101,7 +102,7 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
     class FakeLoop:
         def tick(self, domain, repo_path=None, metadata=None):
             asyncio.get_running_loop().create_task(
-                runner._notify_autonomy_review_created('review_42', source=make_source())
+                runner._notify_autonomy_review_created('review_42', source=make_source(Platform.TELEGRAM))
             )
             from autonomy.execution_loop import TickResult
 
@@ -116,7 +117,7 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
     monkeypatch.setattr(runner, '_build_gateway_autonomy_execution_loop', lambda store, source=None: FakeLoop())
     monkeypatch.setattr('gateway.autonomy_review.format_review_notification', lambda review_id: f'notification for {review_id}')
 
-    send = await send_and_capture(adapter, '/autonomy-run')
+    send = await send_and_capture(adapter, '/autonomy-run', Platform.TELEGRAM)
     assert send.call_count == 2
     messages = [
         (call.kwargs.get('content') or call.args[1])
