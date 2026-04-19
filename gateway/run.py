@@ -977,6 +977,35 @@ class GatewayRunner:
             ),
         )
 
+    async def _handle_gateway_autonomy_seed_command(self, event: MessageEvent) -> str:
+        from autonomy.store import AutonomyStore
+
+        store = AutonomyStore()
+        try:
+            if not store.list_goals(domain='code_projects'):
+                store.create_goal(
+                    goal_id='goal_repo_health',
+                    title='Continuously improve Hermes repo health and reduce manual maintenance drag.',
+                    domain='code_projects',
+                    priority=100,
+                    success_signals=['safe_repo_inspection', 'review_quality', 'verification_evidence'],
+                )
+            try:
+                store.get_policy_for_domain('code_projects')
+            except KeyError:
+                store.create_policy(
+                    policy_id='policy_code_projects',
+                    domain='code_projects',
+                    trust_level=1,
+                    allowed_actions=['inspect_repo', 'codex_task'],
+                    approval_required_for=['codex_task'],
+                    verification_required=True,
+                    max_parallelism=1,
+                )
+        finally:
+            store.close()
+        return 'Seeded repo-health autonomy goal/policy for code_projects. Next: run /autonomy-run.'
+
     async def _handle_gateway_autonomy_run_command(self, event: MessageEvent) -> str:
         from autonomy.store import AutonomyStore
 
@@ -3632,6 +3661,9 @@ class GatewayRunner:
 
         if canonical == "review":
             return await self._handle_review_queue_command(event)
+
+        if canonical == "autonomy-seed":
+            return await self._handle_gateway_autonomy_seed_command(event)
 
         if canonical == "autonomy-run":
             return await self._handle_gateway_autonomy_run_command(event)
