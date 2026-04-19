@@ -480,6 +480,50 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
+_AUTOWORKFLOW_REVIEW_TEXT_RE = re.compile(
+    r"^\s*(review(?:\s+next)?|approve|reject|edit|defer)\b(?:\s+([^\s]+))?(?:\s+(.*))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_autoworkflow_review_text(text: str) -> tuple[str, str | None, str] | None:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return None
+    match = _AUTOWORKFLOW_REVIEW_TEXT_RE.match(raw)
+    if not match:
+        return None
+    action = match.group(1).lower().split()[0]
+    review_item_id = (match.group(2) or "").strip() or None
+    notes = (match.group(3) or "").strip()
+    return action, review_item_id, notes
+
+
+def _load_autoworkflow_review_runtime_config() -> dict[str, Any]:
+    from gateway.autoworkflow_review import load_autoworkflow_review_config
+
+    return load_autoworkflow_review_config(_load_gateway_config())
+
+
+def _load_autonomy_runtime_config() -> dict[str, Any]:
+    cfg = _load_gateway_config()
+    section = cfg.get('autonomy', {}) if isinstance(cfg, dict) else {}
+    if not isinstance(section, dict):
+        section = {}
+    enabled = bool(section.get('enabled', False))
+    tick_minutes = int(section.get('tick_interval_minutes') or 15)
+    allowed_domains = section.get('allowed_domains') or ['code_projects']
+    if not isinstance(allowed_domains, list):
+        allowed_domains = ['code_projects']
+    telegram_reviews_enabled = bool(section.get('telegram_reviews_enabled', True))
+    return {
+        'enabled': enabled,
+        'tick_interval_minutes': max(1, tick_minutes),
+        'allowed_domains': [str(domain) for domain in allowed_domains if str(domain).strip()] or ['code_projects'],
+        'telegram_reviews_enabled': telegram_reviews_enabled,
+    }
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -686,6 +730,7 @@ class GatewayRunner:
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        self._voice_copilot_mode: Dict[str, bool] = self._load_voice_copilot_modes()
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
@@ -706,6 +751,7 @@ class GatewayRunner:
     # -- Voice mode persistence ------------------------------------------
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
+    _VOICE_COPILOT_MODE_PATH = _hermes_home / "gateway_voice_copilot_mode.json"
 
     def _load_voice_modes(self) -> Dict[str, str]:
         try:
@@ -731,6 +777,284 @@ class GatewayRunner:
             )
         except OSError as e:
             logger.warning("Failed to save voice modes: %s", e)
+
+    def _load_voice_copilot_modes(self) -> Dict[str, bool]:
+        try:
+            data = json.loads(self._VOICE_COPILOT_MODE_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+        if not isinstance(data, dict):
+            return {}
+
+        return {
+            str(chat_id): True
+            for chat_id, enabled in data.items()
+            if bool(enabled)
+        }
+
+    def _save_voice_copilot_modes(self) -> None:
+        try:
+            self._VOICE_COPILOT_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._VOICE_COPILOT_MODE_PATH.write_text(
+                json.dumps(self._voice_copilot_mode, indent=2)
+            )
+        except OSError as e:
+            logger.warning("Failed to save voice copilot modes: %s", e)
+
+    def _is_voice_copilot_active(self, chat_id: str) -> bool:
+        return bool(self._voice_copilot_mode.get(str(chat_id)))
+
+    @staticmethod
+    def _match_voice_copilot_confirmation_text(text: str) -> Optional[str]:
+        normalized = " ".join((text or "").strip().lower().split())
+        if not normalized:
+            return None
+
+        deny_phrases = (
+            "deny",
+            "don't do that",
+            "do not do that",
+            "cancel",
+            "cancel it",
+            "stop",
+            "never mind",
+            "abort",
+        )
+        if any(phrase in normalized for phrase in deny_phrases):
+            return "deny"
+
+        approve_phrases = (
+            "approve and merge",
+            "approve merge",
+            "approve it",
+            "approve",
+            "merge it",
+            "merge the pr",
+            "ship it",
+        )
+        if any(phrase in normalized for phrase in approve_phrases):
+            return "approve"
+        return None
+
+    def _autoworkflow_review_config(self) -> dict[str, Any]:
+        return _load_autoworkflow_review_runtime_config()
+
+
+    def _autoworkflow_review_enabled(self) -> bool:
+        return bool(self._autoworkflow_review_config().get("enabled"))
+
+    def _autonomy_config(self) -> dict[str, Any]:
+        return _load_autonomy_runtime_config()
+
+    def _autonomy_enabled(self) -> bool:
+        return bool(self._autonomy_config().get('enabled'))
+
+    def _get_or_create_autonomy_scheduler(self):
+        from autonomy.scheduler import AutonomyScheduler
+        from autonomy.store import AutonomyStore
+
+        cfg = self._autonomy_config()
+        scheduler = getattr(self, '_autonomy_scheduler', None)
+        current_signature = (
+            cfg['tick_interval_minutes'],
+            tuple(cfg['allowed_domains']),
+        )
+        if scheduler is not None and getattr(self, '_autonomy_scheduler_signature', None) == current_signature:
+            return scheduler
+
+        store = AutonomyStore()
+        loop = self._build_gateway_autonomy_execution_loop(store=store)
+        scheduler = AutonomyScheduler(
+            loop=loop,
+            interval_seconds=int(cfg['tick_interval_minutes']) * 60,
+        )
+        self._autonomy_store = store
+        self._autonomy_scheduler = scheduler
+        self._autonomy_scheduler_signature = current_signature
+        return scheduler
+
+    async def _maybe_run_autonomy_scheduler_tick(self) -> list[str]:
+        if not self._autonomy_enabled():
+            return []
+        scheduler = self._get_or_create_autonomy_scheduler()
+        cfg = self._autonomy_config()
+        repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
+
+        def _run_triggers() -> list[str]:
+            messages: list[str] = []
+            for domain in cfg['allowed_domains']:
+                result = scheduler.trigger(domain=domain, repo_path=repo_path)
+                if result.ran and result.tick_result and result.tick_result.review_id:
+                    messages.append(result.tick_result.review_id)
+            return messages
+
+        return await asyncio.to_thread(_run_triggers)
+
+
+    async def _handle_review_queue_command(self, event: MessageEvent) -> str:
+        if not self._autoworkflow_review_enabled():
+            return "AutoWorkflow review queue is not enabled."
+        from gateway.autoworkflow_review import list_review_items, render_review_cards
+
+        cfg = self._autoworkflow_review_config()
+        items = await list_review_items(
+            cfg["base_url"],
+            cfg["api_token"],
+            limit=int(cfg.get("digest_limit") or 5),
+        )
+        return render_review_cards(items)
+
+
+    async def _handle_review_decision_command(
+        self,
+        event: MessageEvent,
+        action: str,
+        *,
+        review_item_id: str | None = None,
+        notes: str = "",
+    ) -> str:
+        if not self._autoworkflow_review_enabled():
+            return "AutoWorkflow review queue is not enabled."
+        item_id = (review_item_id or event.get_command_args().strip().split(maxsplit=1)[0] if event.get_command_args().strip() else "").strip()
+        if not item_id:
+            return f"Usage: /{action} <review-item-id>"
+        if not notes:
+            raw_args = event.get_command_args().strip()
+            if raw_args.startswith(item_id):
+                notes = raw_args[len(item_id):].strip()
+        from gateway.autoworkflow_review import submit_review_decision
+
+        cfg = self._autoworkflow_review_config()
+        result = await submit_review_decision(cfg["base_url"], cfg["api_token"], item_id, action, notes)
+        status = result.get("status") or action
+        if notes:
+            return f"✓ {status} {item_id}."
+        return f"✓ {status} {item_id}."
+
+    async def _handle_autonomy_reviews_command(self) -> str:
+        from gateway.autonomy_review import list_reviews, render_review_cards
+
+        items = await asyncio.to_thread(list_reviews)
+        return render_review_cards(items)
+
+    async def _notify_autonomy_review_created(self, review_id: str, *, source: SessionSource | None = None) -> None:
+        from gateway.autonomy_review import format_review_notification
+
+        if not self._autonomy_config().get('telegram_reviews_enabled', True):
+            return
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if adapter is None:
+            return
+        home = self.config.get_home_channel(Platform.TELEGRAM)
+        target_chat_id = None
+        if home is not None:
+            target_chat_id = home.chat_id
+        elif source is not None and source.platform == Platform.TELEGRAM:
+            target_chat_id = source.chat_id
+        if not target_chat_id:
+            return
+        message = await asyncio.to_thread(format_review_notification, review_id)
+        await adapter.send(target_chat_id, message)
+
+    def _build_gateway_autonomy_execution_loop(self, *, store, source: SessionSource | None = None):
+        from autonomy.execution_loop import AutonomyExecutionLoop
+        from autonomy.executors.codex_executor import CodexExecutor
+        from autonomy.executors.repo_executor import RepoExecutor
+        from autonomy.sensors.repo_git_state import RepoGitStateSensor
+        from autonomy.sensors.repo_health import RepoHealthSensor
+
+        loop_handle = asyncio.get_running_loop()
+        return AutonomyExecutionLoop(
+            store=store,
+            sensors=[RepoGitStateSensor(), RepoHealthSensor()],
+            executors={
+                'repo_executor': RepoExecutor(),
+                'codex_executor': CodexExecutor(),
+            },
+            review_notifier=lambda review_id: loop_handle.create_task(
+                self._notify_autonomy_review_created(review_id, source=source)
+            ),
+        )
+
+    async def _handle_gateway_autonomy_run_command(self, event: MessageEvent) -> str:
+        from autonomy.store import AutonomyStore
+
+        repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
+        store = AutonomyStore()
+        try:
+            loop = self._build_gateway_autonomy_execution_loop(store=store, source=event.source)
+            result = loop.tick(domain='code_projects', repo_path=repo_path)
+        finally:
+            store.close()
+
+        lines = [f'Autonomy tick: {result.status}']
+        if result.execution_id:
+            lines.append(f'Execution: {result.execution_id}')
+        if result.review_id:
+            lines.append(f'Review: {result.review_id}')
+        if result.learning_id:
+            lines.append(f'Learning: {result.learning_id}')
+        return '\n'.join(lines)
+
+    async def _handle_autonomy_review_approve_command(self, event: MessageEvent) -> str:
+        from gateway.autonomy_review import approve_review
+
+        review_id = event.get_command_args().strip()
+        if not review_id:
+            return 'Usage: /review-approve <review_id>'
+        try:
+            result = await asyncio.to_thread(approve_review, review_id)
+        except KeyError:
+            return f'Autonomy review not found: {review_id}'
+        return f"✓ approved {result['review_id']}, executed {result['execution_id']} via {result['executor_type']}."
+
+    async def _handle_autonomy_review_reject_command(self, event: MessageEvent) -> str:
+        from gateway.autonomy_review import reject_review
+
+        raw_args = event.get_command_args().strip()
+        if not raw_args:
+            return 'Usage: /review-reject <review_id> [reason]'
+        parts = raw_args.split(maxsplit=1)
+        review_id = parts[0].strip()
+        reason = parts[1].strip() if len(parts) > 1 else ''
+        try:
+            result = await asyncio.to_thread(reject_review, review_id, reason)
+        except KeyError:
+            return f'Autonomy review not found: {review_id}'
+        suffix = f" Reason: {reason}" if reason else ''
+        return f"✓ rejected {result['review_id']}.{suffix}"
+
+
+    def _voice_copilot_prompt(self) -> str:
+        return (
+            "[Voice copilot session is active. The user is talking from an iPhone-triggered, "
+            "Bluetooth-headset-friendly voice workflow. Reply in a spoken-friendly copilot style: "
+            "concise but not clipped (shmedium), clear enough to hear once, and avoid giant lists unless asked. "
+            "Treat brainstorming, repo inspection, design docs, drafting PRs, opening issues in the user's own repos, "
+            "and emailing the user as pre-approved. For merges or destructive actions, require an explicit approval phrase. "
+            "When the user says to merge a PR, interpret it as merge after CI passes. On failures, summarize briefly and retry safe alternatives automatically. "
+            "Final receipts should land in Telegram with links when relevant.]"
+        )
+
+    async def _transcribe_voice_copilot_confirmation(self, event: MessageEvent) -> Optional[str]:
+        if event.message_type not in (MessageType.VOICE, MessageType.AUDIO):
+            return self._match_voice_copilot_confirmation_text(event.text or "")
+
+        audio_paths = []
+        media_types = event.media_types or []
+        for i, path in enumerate(event.media_urls or []):
+            mtype = media_types[i] if i < len(media_types) else ""
+            if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                audio_paths.append(path)
+        if not audio_paths:
+            return None
+
+        try:
+            enriched = await self._enrich_message_with_transcription("", audio_paths)
+        except Exception:
+            return None
+        return self._match_voice_copilot_confirmation_text(enriched)
 
     def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
@@ -2891,6 +3215,31 @@ class GatewayRunner:
                 label = response_text if len(response_text) <= 20 else response_text[:20] + "…"
                 return f"✓ Sent `{label}` to the update process."
 
+        raw_review = _parse_autoworkflow_review_text(event.text or "")
+        if raw_review and self._autoworkflow_review_enabled():
+            action, review_item_id, notes = raw_review
+            if action == "review":
+                return await self._handle_review_queue_command(event)
+            return await self._handle_review_decision_command(
+                event,
+                action,
+                review_item_id=review_item_id,
+                notes=notes,
+            )
+
+        from tools.approval import has_blocking_approval
+        if has_blocking_approval(_quick_key) and self._is_voice_copilot_active(source.chat_id):
+            approval_intent = await self._transcribe_voice_copilot_confirmation(event)
+            if approval_intent == "approve":
+                return await self._handle_approve_command(event)
+            if approval_intent == "deny":
+                return await self._handle_deny_command(event)
+            if event.message_type in (MessageType.VOICE, MessageType.AUDIO, MessageType.TEXT):
+                return (
+                    "I’m waiting on your approval for the pending action. "
+                    "Say or send 'approve and merge' to continue, or 'deny' to cancel."
+                )
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -3278,6 +3627,33 @@ class GatewayRunner:
         if canonical == "reload-mcp":
             return await self._handle_reload_mcp_command(event)
 
+        if canonical == "review":
+            return await self._handle_review_queue_command(event)
+
+        if canonical == "autonomy-run":
+            return await self._handle_gateway_autonomy_run_command(event)
+
+        if canonical == "reviews":
+            return await self._handle_autonomy_reviews_command()
+
+        if canonical == "review-approve":
+            return await self._handle_autonomy_review_approve_command(event)
+
+        if canonical == "review-reject":
+            return await self._handle_autonomy_review_reject_command(event)
+
+        if canonical == "approve" and self._autoworkflow_review_enabled() and event.get_command_args().strip():
+            return await self._handle_review_decision_command(event, "approve")
+
+        if canonical == "reject":
+            return await self._handle_review_decision_command(event, "reject")
+
+        if canonical == "edit":
+            return await self._handle_review_decision_command(event, "edit")
+
+        if canonical == "defer":
+            return await self._handle_review_decision_command(event, "defer")
+
         if canonical == "approve":
             return await self._handle_approve_command(event)
 
@@ -3325,6 +3701,9 @@ class GatewayRunner:
 
         if canonical == "voice":
             return await self._handle_voice_command(event)
+
+        if canonical == "copilot":
+            return await self._handle_copilot_command(event)
 
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
@@ -3685,6 +4064,8 @@ class GatewayRunner:
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
+        if self._is_voice_copilot_active(source.chat_id):
+            context_prompt = (context_prompt + "\n\n" + self._voice_copilot_prompt()).strip()
         
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
@@ -5642,6 +6023,45 @@ class GatewayRunner:
                 if adapter:
                     self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
                 return "Voice mode disabled."
+
+    async def _handle_copilot_command(self, event: MessageEvent) -> str:
+        """Handle /copilot [on|off|status] command for voice-first sessions."""
+        args = event.get_command_args().strip().lower()
+        chat_id = event.source.chat_id
+        adapter = self.adapters.get(event.source.platform)
+
+        if args in ("", "on", "enable", "start"):
+            self._voice_copilot_mode[chat_id] = True
+            self._save_voice_copilot_modes()
+            self._voice_mode[chat_id] = "voice_only"
+            self._save_voice_modes()
+            if adapter:
+                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=False)
+            return (
+                "Voice copilot is live. Send voice notes and I’ll answer in a spoken-friendly copilot style.\n"
+                "I can brainstorm, inspect repos, draft PRs, open issues in your repos, and email you.\n"
+                "For merges or risky actions, say an explicit approval phrase like 'approve and merge'."
+            )
+
+        if args in ("off", "disable", "stop"):
+            self._voice_copilot_mode[chat_id] = False
+            self._save_voice_copilot_modes()
+            self._voice_mode[chat_id] = "off"
+            self._save_voice_modes()
+            if adapter:
+                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            return "Voice copilot stopped. Hermes is back to text-only replies in this chat."
+
+        if args == "status":
+            active = self._is_voice_copilot_active(chat_id)
+            voice_mode = self._voice_mode.get(chat_id, "off")
+            return (
+                f"Voice copilot: {'on' if active else 'off'}\n"
+                f"Voice reply mode: {voice_mode}\n"
+                "Approval phrase: 'approve and merge'"
+            )
+
+        return "Usage: /copilot [on|off|status]"
 
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
@@ -10124,7 +10544,7 @@ class GatewayRunner:
         return response
 
 
-def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, runner=None):
     """
     Background thread that ticks the cron scheduler at a regular interval.
     
@@ -10148,6 +10568,12 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     while not stop_event.is_set():
         try:
             cron_tick(verbose=False, adapters=adapters, loop=loop)
+            if runner is not None and loop is not None and loop.is_running():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(runner._maybe_run_autonomy_scheduler_tick(), loop)
+                    future.result(timeout=max(1, min(interval, 30)))
+                except Exception as e:
+                    logger.debug("Autonomy scheduler tick error: %s", e)
         except Exception as e:
             logger.debug("Cron tick error: %s", e)
 
@@ -10411,7 +10837,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_thread = threading.Thread(
         target=_start_cron_ticker,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(), "runner": runner},
         daemon=True,
         name="cron-ticker",
     )

@@ -77,7 +77,9 @@ def _make_runner(tmp_path):
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
+    runner._voice_copilot_mode = {}
     runner._VOICE_MODE_PATH = tmp_path / "gateway_voice_mode.json"
+    runner._VOICE_COPILOT_MODE_PATH = tmp_path / "gateway_voice_copilot_mode.json"
     runner._session_db = None
     runner.session_store = MagicMock()
     runner._is_user_authorized = lambda source: True
@@ -193,6 +195,57 @@ class TestHandleVoiceCommand:
         await runner._handle_voice_command(e2)
         assert runner._voice_mode["aaa"] == "voice_only"
         assert runner._voice_mode["bbb"] == "all"
+
+
+class TestHandleCopilotCommand:
+
+    @pytest.fixture
+    def runner(self, tmp_path):
+        return _make_runner(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_copilot_on_enables_voice_mode(self, runner):
+        event = _make_event("/copilot on")
+        result = await runner._handle_copilot_command(event)
+        assert "Voice copilot is live" in result
+        assert runner._voice_copilot_mode["123"] is True
+        assert runner._voice_mode["123"] == "voice_only"
+
+    @pytest.mark.asyncio
+    async def test_copilot_off_disables_voice_mode(self, runner):
+        runner._voice_copilot_mode["123"] = True
+        runner._voice_mode["123"] = "voice_only"
+        event = _make_event("/copilot off")
+        result = await runner._handle_copilot_command(event)
+        assert "stopped" in result.lower()
+        assert runner._voice_copilot_mode["123"] is False
+        assert runner._voice_mode["123"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_copilot_status(self, runner):
+        runner._voice_copilot_mode["123"] = True
+        runner._voice_mode["123"] = "voice_only"
+        event = _make_event("/copilot status")
+        result = await runner._handle_copilot_command(event)
+        assert "Voice copilot: on" in result
+        assert "approve and merge" in result
+
+
+class TestVoiceCopilotApprovalPhrases:
+
+    def test_matches_approve_phrase(self, tmp_path):
+        runner = _make_runner(tmp_path)
+        assert runner._match_voice_copilot_confirmation_text("approve and merge") == "approve"
+        assert runner._match_voice_copilot_confirmation_text("please merge it") == "approve"
+
+    def test_matches_deny_phrase(self, tmp_path):
+        runner = _make_runner(tmp_path)
+        assert runner._match_voice_copilot_confirmation_text("deny") == "deny"
+        assert runner._match_voice_copilot_confirmation_text("never mind, cancel it") == "deny"
+
+    def test_ignores_unrelated_text(self, tmp_path):
+        runner = _make_runner(tmp_path)
+        assert runner._match_voice_copilot_confirmation_text("tell me more about the diff") is None
 
 
 # =====================================================================

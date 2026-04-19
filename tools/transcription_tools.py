@@ -85,11 +85,67 @@ GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-lar
 # Singleton for the local model — loaded once, reused across calls
 _local_model: Optional[object] = None
 _local_model_name: Optional[str] = None
+_local_model_runtime: Optional[tuple[str, str]] = None
 
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
+
+def get_stt_model_from_config() -> Optional[str]:
+    """Return a provider-compatible STT model override from config.
+
+    Preference order:
+      1. Provider-specific nested config (``stt.local.model``, ``stt.openai.model``,
+         ``stt.groq.model``, ``stt.mistral.model``)
+      2. Legacy ``stt.model`` only when it matches the active provider
+
+    Returns ``None`` on missing config or parse errors.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        stt_config = read_raw_config().get("stt", {})
+        if not isinstance(stt_config, dict):
+            return None
+
+        provider = stt_config.get("provider") or _get_provider(stt_config)
+        legacy_model = stt_config.get("model")
+
+        if provider in {"local", "local_command"}:
+            local_cfg = stt_config.get("local", {})
+            if isinstance(local_cfg, dict) and local_cfg.get("model"):
+                return local_cfg["model"]
+            if isinstance(legacy_model, str) and legacy_model not in OPENAI_MODELS and legacy_model not in GROQ_MODELS:
+                return legacy_model
+            return None
+
+        if provider == "openai":
+            openai_cfg = stt_config.get("openai", {})
+            if isinstance(openai_cfg, dict) and openai_cfg.get("model"):
+                return openai_cfg["model"]
+            if legacy_model in OPENAI_MODELS:
+                return legacy_model
+            return None
+
+        if provider == "groq":
+            groq_cfg = stt_config.get("groq", {})
+            if isinstance(groq_cfg, dict) and groq_cfg.get("model"):
+                return groq_cfg["model"]
+            if legacy_model in GROQ_MODELS:
+                return legacy_model
+            return None
+
+        if provider == "mistral":
+            mistral_cfg = stt_config.get("mistral", {})
+            if isinstance(mistral_cfg, dict) and mistral_cfg.get("model"):
+                return mistral_cfg["model"]
+            if isinstance(legacy_model, str) and legacy_model.startswith("voxtral"):
+                return legacy_model
+            return None
+    except Exception:
+        pass
+    return None
 
 
 def _load_stt_config() -> dict:
@@ -279,20 +335,61 @@ def _validate_audio_file(file_path: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _should_retry_local_on_cpu(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(token in message for token in (
+        "libcublas",
+        "libcudnn",
+        "cuda",
+        "cublas",
+        "cudnn",
+    ))
+
+
+def _set_local_model(model_name: str, runtime: tuple[str, str]):
+    from faster_whisper import WhisperModel
+
+    global _local_model, _local_model_name, _local_model_runtime
+    model = WhisperModel(model_name, device=runtime[0], compute_type=runtime[1])
+    _local_model = model
+    _local_model_name = model_name
+    _local_model_runtime = runtime
+    return model
+
+
+def _load_local_whisper_model(model_name: str):
+    global _local_model, _local_model_name, _local_model_runtime
+
+    preferred_runtime = ("auto", "auto")
+    if _local_model is not None and _local_model_name == model_name and _local_model_runtime == preferred_runtime:
+        return _local_model
+
+    try:
+        logger.info("Loading faster-whisper model '%s' with runtime %s/%s", model_name, *preferred_runtime)
+        return _set_local_model(model_name, preferred_runtime)
+    except Exception as e:
+        if not _should_retry_local_on_cpu(e):
+            raise
+        fallback_runtime = ("cpu", "int8")
+        logger.warning(
+            "Local faster-whisper GPU runtime unavailable for '%s' (%s), retrying on CPU",
+            model_name,
+            e,
+        )
+        return _set_local_model(model_name, fallback_runtime)
+
+
 def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
-    global _local_model, _local_model_name
+    global _local_model, _local_model_name, _local_model_runtime
 
     if not _HAS_FASTER_WHISPER:
         return {"success": False, "transcript": "", "error": "faster-whisper not installed"}
 
     try:
-        from faster_whisper import WhisperModel
         # Lazy-load the model (downloads on first use, ~150 MB for 'base')
         if _local_model is None or _local_model_name != model_name:
-            logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
-            _local_model = WhisperModel(model_name, device="auto", compute_type="auto")
-            _local_model_name = model_name
+            _load_local_whisper_model(model_name)
 
         # Language: config.yaml (stt.local.language) > env var > auto-detect.
         _forced_lang = (
@@ -304,12 +401,25 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
         if _forced_lang:
             transcribe_kwargs["language"] = _forced_lang
 
-        segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
+        try:
+            segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
+        except Exception as e:
+            if _should_retry_local_on_cpu(e) and _local_model_runtime != ("cpu", "int8"):
+                logger.warning(
+                    "Local faster-whisper runtime %s/%s failed during transcription (%s), retrying on CPU",
+                    *(_local_model_runtime or ("unknown", "unknown")),
+                    e,
+                )
+                _set_local_model(model_name, ("cpu", "int8"))
+                segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
+            else:
+                raise
         transcript = " ".join(segment.text.strip() for segment in segments)
 
         logger.info(
-            "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",
+            "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio, runtime=%s/%s)",
             Path(file_path).name, model_name, info.language, info.duration,
+            *(_local_model_runtime or ("unknown", "unknown")),
         )
 
         return {"success": True, "transcript": transcript, "provider": "local"}

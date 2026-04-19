@@ -433,7 +433,8 @@ class TestTranscribeLocalExtended:
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
              patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              patch("tools.transcription_tools._local_model", None), \
-             patch("tools.transcription_tools._local_model_name", None):
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
             from tools.transcription_tools import _transcribe_local
             _transcribe_local(str(audio), "base")
             _transcribe_local(str(audio), "base")
@@ -459,12 +460,74 @@ class TestTranscribeLocalExtended:
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
              patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              patch("tools.transcription_tools._local_model", None), \
-             patch("tools.transcription_tools._local_model_name", None):
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
             from tools.transcription_tools import _transcribe_local
             _transcribe_local(str(audio), "base")
             _transcribe_local(str(audio), "small")
 
         assert mock_whisper_cls.call_count == 2
+
+    def test_retries_on_cpu_when_cuda_runtime_missing_during_model_load(self, tmp_path):
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+
+        mock_segment = MagicMock()
+        mock_segment.text = "hi"
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 1.0
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = ([mock_segment], mock_info)
+
+        mock_whisper_cls = MagicMock(side_effect=[
+            RuntimeError("Library libcublas.so.12 is not found or cannot be loaded"),
+            mock_model,
+        ])
+
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+             patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
+            from tools.transcription_tools import _transcribe_local
+            result = _transcribe_local(str(audio), "base")
+
+        assert result["success"] is True
+        assert result["transcript"] == "hi"
+        assert mock_whisper_cls.call_args_list[0].kwargs == {"device": "auto", "compute_type": "auto"}
+        assert mock_whisper_cls.call_args_list[1].kwargs == {"device": "cpu", "compute_type": "int8"}
+
+    def test_retries_on_cpu_when_cuda_runtime_missing_during_transcribe(self, tmp_path):
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        mock_info.duration = 1.0
+
+        gpu_model = MagicMock()
+        gpu_model.transcribe.side_effect = RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+
+        cpu_segment = MagicMock()
+        cpu_segment.text = "cpu fallback"
+        cpu_model = MagicMock()
+        cpu_model.transcribe.return_value = ([cpu_segment], mock_info)
+
+        mock_whisper_cls = MagicMock(side_effect=[gpu_model, cpu_model])
+
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+             patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
+            from tools.transcription_tools import _transcribe_local
+            result = _transcribe_local(str(audio), "base")
+
+        assert result["success"] is True
+        assert result["transcript"] == "cpu fallback"
+        assert mock_whisper_cls.call_args_list[0].kwargs == {"device": "auto", "compute_type": "auto"}
+        assert mock_whisper_cls.call_args_list[1].kwargs == {"device": "cpu", "compute_type": "int8"}
 
     def test_exception_returns_failure(self, tmp_path):
         audio = tmp_path / "test.ogg"
@@ -474,7 +537,9 @@ class TestTranscribeLocalExtended:
 
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
              patch("faster_whisper.WhisperModel", mock_whisper_cls), \
-             patch("tools.transcription_tools._local_model", None):
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
             from tools.transcription_tools import _transcribe_local
             result = _transcribe_local(str(audio), "large-v3")
 
@@ -498,7 +563,9 @@ class TestTranscribeLocalExtended:
 
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
              patch("faster_whisper.WhisperModel", return_value=mock_model), \
-             patch("tools.transcription_tools._local_model", None):
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None), \
+             patch("tools.transcription_tools._local_model_runtime", None):
             from tools.transcription_tools import _transcribe_local
             result = _transcribe_local(str(audio), "base")
 
@@ -815,6 +882,75 @@ class TestTranscribeAudioDispatch:
             transcribe_audio(sample_ogg, model=None)
 
         assert mock_openai.call_args[0][1] == "gpt-4o-transcribe"
+
+
+# ============================================================================
+# get_stt_model_from_config
+# ============================================================================
+
+class TestGetSttModelFromConfig:
+    def test_returns_local_nested_model_for_local_provider(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: local\n  local:\n    model: small\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() == "small"
+
+    def test_ignores_openai_legacy_model_for_local_provider(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: local\n  model: whisper-1\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() is None
+
+    def test_returns_openai_nested_model_for_openai_provider(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: openai\n  openai:\n    model: gpt-4o-mini-transcribe\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() == "gpt-4o-mini-transcribe"
+
+    def test_returns_legacy_model_when_it_matches_active_provider(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  provider: groq\n  model: whisper-large-v3\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() == "whisper-large-v3"
+
+    def test_returns_none_when_no_stt_section(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("tts:\n  provider: edge\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() is None
+
+    def test_returns_none_when_no_config_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() is None
+
+    def test_returns_none_on_invalid_yaml(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(": : :\n  bad yaml [[[")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() is None
+
+    def test_returns_none_when_model_key_missing(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("stt:\n  enabled: true\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from tools.transcription_tools import get_stt_model_from_config
+        assert get_stt_model_from_config() is None
 
 
 # ============================================================================
