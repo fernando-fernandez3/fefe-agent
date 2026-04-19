@@ -4035,6 +4035,293 @@ class HermesCLI:
         print(f"  Home:    {display}")
         print()
 
+    def _open_autonomy_store(self):
+        from autonomy.store import AutonomyStore
+
+        return AutonomyStore()
+
+    def _handle_autonomy_summary_command(self):
+        from autonomy.reporting import AutonomyReporter
+
+        store = self._open_autonomy_store()
+        try:
+            reporter = AutonomyReporter()
+            report = reporter.build_report(store=store)
+            print()
+            for line in reporter.render_text(report).splitlines():
+                print(f"  {line}")
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_goals_command(self):
+        store = self._open_autonomy_store()
+        try:
+            goals = store.list_goals()
+            print()
+            if not goals:
+                print("  No autonomy goals stored.")
+                print()
+                return
+
+            print("  Autonomy goals")
+            for goal in goals:
+                print(f"  - [{goal.status.value}] {goal.title} ({goal.domain}, priority {goal.priority})")
+            print()
+        finally:
+            store.close()
+
+    def _build_autonomy_execution_loop(self, *, store):
+        from autonomy.execution_loop import AutonomyExecutionLoop
+        from autonomy.executors.codex_executor import CodexExecutor
+        from autonomy.executors.repo_executor import RepoExecutor
+        from autonomy.sensors.repo_git_state import RepoGitStateSensor
+        from autonomy.sensors.repo_health import RepoHealthSensor
+
+        return AutonomyExecutionLoop(
+            store=store,
+            sensors=[RepoGitStateSensor(), RepoHealthSensor()],
+            executors={
+                'repo_executor': RepoExecutor(),
+                'codex_executor': CodexExecutor(),
+            },
+        )
+
+    def _handle_autonomy_reviews_command(self):
+        from autonomy.review_packets import ReviewPacketFormatter
+
+        store = self._open_autonomy_store()
+        try:
+            reviews = store.list_pending_reviews()
+            print()
+            if not reviews:
+                print("  No pending autonomy reviews.")
+                print()
+                return
+
+            formatter = ReviewPacketFormatter()
+            print("  Pending autonomy reviews")
+            for review in reviews:
+                execution = store.get_execution(review.execution_id)
+                packet = formatter.format(review=review, execution=execution)
+                print(f"  - {review.id} [{review.review_type}] {review.reason} ({review.domain})")
+                print(f"    {packet.approval_effect}")
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_review_approve_command(self, cmd_original: str):
+        parts = cmd_original.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            print("\n  Usage: /review-approve <review_id>\n")
+            return
+        review_id = parts[1].strip()
+        store = self._open_autonomy_store()
+        try:
+            loop = self._build_autonomy_execution_loop(store=store)
+            execution = loop.execute_review(review_id=review_id)
+            print()
+            print(f"  Approved review {review_id}")
+            print(f"  Execution completed: {execution.id} [{execution.executor_type}]")
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_review_reject_command(self, cmd_original: str):
+        parts = cmd_original.split(maxsplit=2)
+        if len(parts) < 2 or not parts[1].strip():
+            print("\n  Usage: /review-reject <review_id> [reason]\n")
+            return
+        review_id = parts[1].strip()
+        reason = parts[2].strip() if len(parts) > 2 else ''
+        store = self._open_autonomy_store()
+        try:
+            loop = self._build_autonomy_execution_loop(store=store)
+            review = loop.reject_review(review_id=review_id, reason=reason)
+            reason_text = reason or 'review rejected'
+            print()
+            print(f"  Rejected review {review.id}")
+            print(f"  Reason: {reason_text}")
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_seed_command(self):
+        store = self._open_autonomy_store()
+        try:
+            if not store.list_goals(domain='code_projects'):
+                store.create_goal(
+                    goal_id='goal_repo_health',
+                    title='Continuously improve Hermes repo health and reduce manual maintenance drag.',
+                    domain='code_projects',
+                    priority=100,
+                    success_signals=['safe_repo_inspection', 'review_quality', 'verification_evidence'],
+                )
+            try:
+                store.get_policy_for_domain('code_projects')
+            except KeyError:
+                store.create_policy(
+                    policy_id='policy_code_projects',
+                    domain='code_projects',
+                    trust_level=1,
+                    allowed_actions=['inspect_repo'],
+                    approval_required_for=[],
+                    verification_required=True,
+                    max_parallelism=1,
+                )
+            print()
+            print('  Seeded repo-health autonomy goal/policy for code_projects.')
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_run_command(self):
+        repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
+        store = self._open_autonomy_store()
+        try:
+            loop = self._build_autonomy_execution_loop(store=store)
+            result = loop.tick(domain='code_projects', repo_path=repo_path)
+            print()
+            print(f'  Autonomy tick: {result.status}')
+            if result.selected_opportunity_id:
+                print(f'  Opportunity: {result.selected_opportunity_id}')
+            if result.execution_id:
+                print(f'  Execution:   {result.execution_id}')
+            if result.review_id:
+                print(f'  Review:      {result.review_id}')
+            if result.learning_id:
+                print(f'  Learning:    {result.learning_id}')
+            if result.blocked_reason:
+                print(f'  Reason:      {result.blocked_reason}')
+            print()
+        finally:
+            store.close()
+
+    def _autonomy_onboarding_custom_answer(self, prompt: str) -> str:
+        if getattr(self, '_app', None) and hasattr(self, '_clarify_callback'):
+            return self._clarify_callback(prompt, None).strip()
+        return input(f'  {prompt}: ').strip()
+
+    def _autonomy_onboarding_multi_select_tui(self, question, onboarding):
+        answers = []
+        remaining = list(question.choices)
+        while remaining:
+            selected_so_far = ', '.join(answers) if answers else 'nothing yet'
+            prompt = f"{question.prompt} Selected so far: {selected_so_far}. Pick another option or finish."
+            response = self._clarify_callback(prompt, remaining + ['Done selecting']).strip()
+            if not response or onboarding.is_placeholder_response(response):
+                break
+            if response == 'Done selecting':
+                break
+            if response in remaining:
+                answers.append(response)
+                remaining.remove(response)
+                continue
+            answers.append(response)
+            break
+        return answers
+
+    def _run_autonomy_onboarding_questionnaire(self, questions):
+        from autonomy.onboarding import GoalOnboarding
+        from hermes_cli.setup import prompt_checklist, prompt_choice
+
+        answers = {}
+        if not questions:
+            return answers
+
+        print()
+        print('  Launching onboarding questionnaire...')
+        use_tui_clarify = bool(getattr(self, '_app', None)) and hasattr(self, '_clarify_callback')
+        onboarding = GoalOnboarding()
+        for question in questions:
+            print()
+            if use_tui_clarify:
+                if question.kind == 'multi':
+                    values = self._autonomy_onboarding_multi_select_tui(question, onboarding)
+                    if values:
+                        answers[question.key] = values
+                    continue
+                response = self._clarify_callback(question.prompt, list(question.choices)).strip()
+                if response and not onboarding.is_placeholder_response(response):
+                    answers[question.key] = response
+                continue
+
+            if question.kind == 'multi':
+                items = list(question.choices) + ['Other (type your answer)']
+                selected = prompt_checklist(question.prompt, items, pre_selected=[])
+                values = [question.choices[idx] for idx in selected if idx < len(question.choices)]
+                if len(question.choices) in selected:
+                    custom = self._autonomy_onboarding_custom_answer('Type your custom answer')
+                    if custom:
+                        values.append(custom)
+                if values:
+                    answers[question.key] = values
+                continue
+
+            items = list(question.choices) + ['Other (type your answer)']
+            selected_idx = prompt_choice(question.prompt, items, 0)
+            if selected_idx == len(question.choices):
+                custom = self._autonomy_onboarding_custom_answer('Type your custom answer')
+                if custom:
+                    answers[question.key] = custom
+                continue
+            answers[question.key] = question.choices[selected_idx]
+
+        return answers
+
+    def _handle_autonomy_onboard_command(self, command: str):
+        from autonomy.onboarding import GoalOnboarding
+
+        repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
+        parts = command.split(None, 1)
+        goal_definition = parts[1] if len(parts) > 1 else ''
+        store = self._open_autonomy_store()
+        try:
+            onboarding = GoalOnboarding()
+            normalized_goal = onboarding._normalize_goal_definition(goal_definition, repo_path)
+            refinement_answers = self._run_autonomy_onboarding_questionnaire(
+                onboarding.refinement_questionnaire(normalized_goal)
+            )
+            result = onboarding.onboard_repo_goal(
+                store=store,
+                repo_path=repo_path,
+                goal_definition=goal_definition,
+                refinement_answers=refinement_answers,
+            )
+            print()
+            print(f'  Onboarded autonomy goal for {repo_path.name}.')
+            print(f'  Goal:   {result.title}')
+            print(f'  Goal ID: {result.goal_id}')
+            print(f'  Policy: {result.policy_id}')
+            if result.refinement_answers:
+                print('  Saved refinement:')
+                print(f'  Summary: {result.goal_summary}')
+            print()
+        finally:
+            store.close()
+
+    def _handle_autonomy_opportunities_command(self):
+        from autonomy.models import OpportunityStatus
+
+        store = self._open_autonomy_store()
+        try:
+            opportunities = store.list_opportunities(status=OpportunityStatus.OPEN)
+            print()
+            if not opportunities:
+                print("  No open autonomy opportunities.")
+                print()
+                return
+
+            print("  Open autonomy opportunities")
+            for opportunity in opportunities[:10]:
+                print(
+                    f"  - {opportunity.title} [{opportunity.domain}] "
+                    f"score={opportunity.score:.2f} risk={opportunity.risk_level}"
+                )
+            print()
+        finally:
+            store.close()
+
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
         # Get terminal config from environment (which was set from cli-config.yaml)
@@ -5696,6 +5983,24 @@ class HermesCLI:
                         print(f"  {status} {p['name']}{version}{detail}{error}")
             except Exception as e:
                 print(f"Plugin system error: {e}")
+        elif canonical == "goals":
+            self._handle_autonomy_goals_command()
+        elif canonical == "autonomy":
+            self._handle_autonomy_summary_command()
+        elif canonical == "autonomy-run":
+            self._handle_autonomy_run_command()
+        elif canonical == "autonomy-seed":
+            self._handle_autonomy_seed_command()
+        elif canonical == "autonomy-onboard":
+            self._handle_autonomy_onboard_command(cmd_original)
+        elif canonical == "review-approve":
+            self._handle_autonomy_review_approve_command(cmd_original)
+        elif canonical == "review-reject":
+            self._handle_autonomy_review_reject_command(cmd_original)
+        elif canonical == "reviews":
+            self._handle_autonomy_reviews_command()
+        elif canonical == "opportunities":
+            self._handle_autonomy_opportunities_command()
         elif canonical == "rollback":
             self._handle_rollback_command(cmd_original)
         elif canonical == "snapshot":
