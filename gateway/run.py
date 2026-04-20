@@ -511,16 +511,27 @@ def _load_autonomy_runtime_config() -> dict[str, Any]:
     if not isinstance(section, dict):
         section = {}
     enabled = bool(section.get('enabled', False))
+    mode = str(section.get('mode') or 'desired_state').strip() or 'desired_state'
+    if mode not in {'desired_state', 'legacy_domain'}:
+        mode = 'desired_state'
     tick_minutes = int(section.get('tick_interval_minutes') or 15)
+    max_actions_per_tick = int(section.get('max_actions_per_tick') or 3)
     allowed_domains = section.get('allowed_domains') or ['code_projects']
     if not isinstance(allowed_domains, list):
         allowed_domains = ['code_projects']
     telegram_reviews_enabled = bool(section.get('telegram_reviews_enabled', True))
+    autoworkflow = section.get('autoworkflow') or {}
+    if not isinstance(autoworkflow, dict):
+        autoworkflow = {}
     return {
         'enabled': enabled,
+        'mode': mode,
         'tick_interval_minutes': max(1, tick_minutes),
+        'max_actions_per_tick': max(1, max_actions_per_tick),
         'allowed_domains': [str(domain) for domain in allowed_domains if str(domain).strip()] or ['code_projects'],
         'telegram_reviews_enabled': telegram_reviews_enabled,
+        'autoworkflow_base_url': str(autoworkflow.get('base_url') or 'http://127.0.0.1:8882').strip(),
+        'autoworkflow_api_token': str(autoworkflow.get('api_token') or '').strip(),
     }
 
 
@@ -874,11 +885,64 @@ class GatewayRunner:
         self._autonomy_scheduler_signature = current_signature
         return scheduler
 
+    def _get_or_create_desired_state_sweep(self):
+        from autonomy.desired_state_sweep import DesiredStateSweep
+        from autonomy.executors.codex_executor import CodexExecutor
+        from autonomy.executors.repo_executor import RepoExecutor
+        from autonomy.sensors.registry import SensorRegistry
+        from autonomy.store import AutonomyStore
+
+        cfg = self._autonomy_config()
+        sweep = getattr(self, '_desired_state_sweep', None)
+        current_signature = (
+            cfg['mode'],
+            cfg['tick_interval_minutes'],
+            cfg['max_actions_per_tick'],
+            tuple(cfg['allowed_domains']),
+            cfg.get('autoworkflow_base_url'),
+            bool(cfg.get('autoworkflow_api_token')),
+        )
+        if sweep is not None and getattr(self, '_desired_state_sweep_signature', None) == current_signature:
+            return sweep
+
+        store = AutonomyStore()
+        loop_handle = asyncio.get_running_loop()
+        registry = SensorRegistry.default(
+            autoworkflow_base_url=cfg.get('autoworkflow_base_url'),
+            autoworkflow_api_token=cfg.get('autoworkflow_api_token'),
+        )
+        sweep = DesiredStateSweep(
+            store=store,
+            sensor_registry=registry,
+            executors={
+                'repo_executor': RepoExecutor(),
+                'codex_executor': CodexExecutor(),
+            },
+            review_notifier=lambda review_id: loop_handle.create_task(
+                self._notify_autonomy_review_created(review_id)
+            ),
+            max_actions_per_tick=cfg['max_actions_per_tick'],
+        )
+        self._autonomy_store = store
+        self._desired_state_sweep = sweep
+        self._desired_state_sweep_signature = current_signature
+        return sweep
+
     async def _maybe_run_autonomy_scheduler_tick(self) -> list[str]:
         if not self._autonomy_enabled():
             return []
-        scheduler = self._get_or_create_autonomy_scheduler()
         cfg = self._autonomy_config()
+        if cfg.get('mode') == 'desired_state':
+            try:
+                sweep = self._get_or_create_desired_state_sweep()
+                result = await asyncio.to_thread(sweep.run)
+                for review_id in result.pending_reviews:
+                    await self._notify_autonomy_review_created(review_id)
+                return [f"Sweep: {result.goals_checked} goals, {result.actions_taken} actions"]
+            except Exception:
+                logger.exception('Desired-state autonomy sweep failed, falling back to legacy domain ticks')
+
+        scheduler = self._get_or_create_autonomy_scheduler()
         repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
 
         def _run_triggers() -> list[str]:

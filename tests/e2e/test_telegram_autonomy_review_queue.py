@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import Future
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -142,9 +142,39 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
 
 
 @pytest.mark.asyncio
-async def test_autonomy_scheduler_tick_runs_allowed_domains(runner, monkeypatch):
+async def test_autonomy_scheduler_tick_runs_desired_state_sweep_and_notifies_reviews(runner, monkeypatch):
+    class FakeSweepResult:
+        goals_checked = 2
+        actions_taken = 1
+        pending_reviews = ['review_99']
+
+    class FakeSweep:
+        def run(self):
+            return FakeSweepResult()
+
+    notify = AsyncMock()
+    monkeypatch.setattr(runner, '_autonomy_enabled', lambda: True)
+    monkeypatch.setattr(runner, '_autonomy_config', lambda: {
+        'enabled': True,
+        'mode': 'desired_state',
+        'tick_interval_minutes': 15,
+        'max_actions_per_tick': 3,
+        'allowed_domains': ['code_projects', 'lab'],
+        'telegram_reviews_enabled': True,
+    })
+    monkeypatch.setattr(runner, '_get_or_create_desired_state_sweep', lambda: FakeSweep())
+    monkeypatch.setattr(runner, '_notify_autonomy_review_created', notify)
+
+    messages = await runner._maybe_run_autonomy_scheduler_tick()
+
+    assert messages == ['Sweep: 2 goals, 1 actions']
+    notify.assert_awaited_once_with('review_99')
+
+
+@pytest.mark.asyncio
+async def test_autonomy_scheduler_tick_falls_back_to_legacy_domains_when_sweep_fails(runner, monkeypatch):
     class FakeTickResult:
-        review_id = 'review_99'
+        review_id = 'review_77'
 
     class FakeScheduler:
         def __init__(self):
@@ -154,19 +184,26 @@ async def test_autonomy_scheduler_tick_runs_allowed_domains(runner, monkeypatch)
             self.calls.append((domain, repo_path))
             return MagicMock(ran=True, tick_result=FakeTickResult())
 
+    class FakeSweep:
+        def run(self):
+            raise RuntimeError('sweep blew up')
+
     fake_scheduler = FakeScheduler()
     monkeypatch.setattr(runner, '_autonomy_enabled', lambda: True)
     monkeypatch.setattr(runner, '_autonomy_config', lambda: {
         'enabled': True,
+        'mode': 'desired_state',
         'tick_interval_minutes': 15,
+        'max_actions_per_tick': 3,
         'allowed_domains': ['code_projects', 'lab'],
         'telegram_reviews_enabled': True,
     })
+    monkeypatch.setattr(runner, '_get_or_create_desired_state_sweep', lambda: FakeSweep())
     monkeypatch.setattr(runner, '_get_or_create_autonomy_scheduler', lambda: fake_scheduler)
 
     review_ids = await runner._maybe_run_autonomy_scheduler_tick()
 
-    assert review_ids == ['review_99', 'review_99']
+    assert review_ids == ['review_77', 'review_77']
     assert [call[0] for call in fake_scheduler.calls] == ['code_projects', 'lab']
 
 
