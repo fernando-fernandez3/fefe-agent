@@ -1121,6 +1121,7 @@ class GatewayRunner:
         )
 
     async def _handle_gateway_autonomy_seed_command(self, event: MessageEvent) -> str:
+        from autonomy.seed import seed_desired_states
         from autonomy.store import AutonomyStore
 
         store = AutonomyStore()
@@ -1145,9 +1146,14 @@ class GatewayRunner:
                     verification_required=True,
                     max_parallelism=1,
                 )
+            seeded = seed_desired_states(store)
         finally:
             store.close()
-        return 'Seeded repo-health autonomy goal/policy for code_projects. Next: run /autonomy-run.'
+        return (
+            'Seeded repo-health autonomy goal/policy for code_projects. '
+            f"Desired states: {seeded['goals_created']} goals, {seeded['matrix_entries_created']} matrix entries, {seeded['policies_created']} policies. "
+            'Next: run /autonomy-run.'
+        )
 
     async def _handle_gateway_autonomy_run_command(self, event: MessageEvent) -> str:
         from autonomy.store import AutonomyStore

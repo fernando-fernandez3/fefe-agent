@@ -4066,7 +4066,32 @@ class HermesCLI:
 
             print("  Autonomy goals")
             for goal in goals:
-                print(f"  - [{goal.status.value}] {goal.title} ({goal.domain}, priority {goal.priority})")
+                matrix_count = len(store.list_goal_matrix_entries(goal_id=goal.id))
+                print(
+                    f"  - [{goal.status.value}] {goal.title} "
+                    f"(domain={goal.domain}, priority={goal.priority}, horizon={goal.horizon}, matrix_entries={matrix_count})"
+                )
+            print()
+        finally:
+            store.close()
+
+    def _handle_goal_matrix_command(self):
+        store = self._open_autonomy_store()
+        try:
+            goals = store.list_goals()
+            print()
+            print('  Goal matrix')
+            printed_any = False
+            for goal in goals:
+                entries = store.list_goal_matrix_entries(goal_id=goal.id)
+                if not entries:
+                    continue
+                printed_any = True
+                print(f'  {goal.title}')
+                for entry in entries:
+                    print(f'    - [{entry.asset_type}] {entry.label} -> {entry.locator}')
+            if not printed_any:
+                print('  No goal matrix entries stored.')
             print()
         finally:
             store.close()
@@ -4147,6 +4172,8 @@ class HermesCLI:
             store.close()
 
     def _handle_autonomy_seed_command(self):
+        from autonomy.seed import seed_desired_states
+
         store = self._open_autonomy_store()
         try:
             if not store.list_goals(domain='code_projects'):
@@ -4169,8 +4196,12 @@ class HermesCLI:
                     verification_required=True,
                     max_parallelism=1,
                 )
+            seeded = seed_desired_states(store)
             print()
             print('  Seeded repo-health autonomy goal/policy for code_projects.')
+            print(
+                f"  Desired states: {seeded['goals_created']} goals, {seeded['matrix_entries_created']} matrix entries, {seeded['policies_created']} policies."
+            )
             print()
         finally:
             store.close()
@@ -5985,6 +6016,8 @@ class HermesCLI:
                 print(f"Plugin system error: {e}")
         elif canonical == "goals":
             self._handle_autonomy_goals_command()
+        elif canonical == "goal-matrix":
+            self._handle_goal_matrix_command()
         elif canonical == "autonomy":
             self._handle_autonomy_summary_command()
         elif canonical == "autonomy-run":

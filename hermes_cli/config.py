@@ -792,6 +792,11 @@ DEFAULT_CONFIG = {
         "max_actions_per_tick": 3,
         "allowed_domains": ["code_projects"],
         "telegram_reviews_enabled": True,
+        "daily_digest": {
+            "enabled": False,
+            "delivery_time": "08:00",
+            "channel": "telegram",
+        },
     },
 
     "autoworkflow_review": {
