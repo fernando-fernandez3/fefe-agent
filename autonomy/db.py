@@ -144,6 +144,20 @@ CREATE TABLE IF NOT EXISTS daily_digests (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS evidence (
+    id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    goal_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    executor_run_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL DEFAULT '{}',
+    impact_summary TEXT NOT NULL DEFAULT '',
+    recorded_at TEXT NOT NULL,
+    FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE,
+    FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS learnings (
     id TEXT PRIMARY KEY,
     domain TEXT NOT NULL,
@@ -164,6 +178,8 @@ CREATE INDEX IF NOT EXISTS idx_world_state_lookup ON world_state(domain, entity_
 CREATE INDEX IF NOT EXISTS idx_opportunities_domain_status ON opportunities(domain, status);
 CREATE INDEX IF NOT EXISTS idx_reviews_status_created_at ON reviews(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_daily_digests_date_key ON daily_digests(date_key DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_goal_id ON evidence(goal_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_opportunity_id ON evidence(opportunity_id, recorded_at DESC);
 '''
 
 MIGRATIONS = [

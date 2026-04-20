@@ -787,9 +787,16 @@ DEFAULT_CONFIG = {
 
     "autonomy": {
         "enabled": False,
+        "mode": "desired_state",
         "tick_interval_minutes": 15,
+        "max_actions_per_tick": 3,
         "allowed_domains": ["code_projects"],
         "telegram_reviews_enabled": True,
+        "daily_digest": {
+            "enabled": False,
+            "delivery_time": "08:00",
+            "channel": "telegram",
+        },
     },
 
     "autoworkflow_review": {

@@ -511,16 +511,35 @@ def _load_autonomy_runtime_config() -> dict[str, Any]:
     if not isinstance(section, dict):
         section = {}
     enabled = bool(section.get('enabled', False))
+    mode = str(section.get('mode') or 'desired_state').strip() or 'desired_state'
+    if mode not in {'desired_state', 'legacy_domain'}:
+        mode = 'desired_state'
     tick_minutes = int(section.get('tick_interval_minutes') or 15)
+    max_actions_per_tick = int(section.get('max_actions_per_tick') or 3)
     allowed_domains = section.get('allowed_domains') or ['code_projects']
     if not isinstance(allowed_domains, list):
         allowed_domains = ['code_projects']
     telegram_reviews_enabled = bool(section.get('telegram_reviews_enabled', True))
+    daily_digest = section.get('daily_digest') or {}
+    if not isinstance(daily_digest, dict):
+        daily_digest = {}
+    autoworkflow = section.get('autoworkflow') or {}
+    if not isinstance(autoworkflow, dict):
+        autoworkflow = {}
     return {
         'enabled': enabled,
+        'mode': mode,
         'tick_interval_minutes': max(1, tick_minutes),
+        'max_actions_per_tick': max(1, max_actions_per_tick),
         'allowed_domains': [str(domain) for domain in allowed_domains if str(domain).strip()] or ['code_projects'],
         'telegram_reviews_enabled': telegram_reviews_enabled,
+        'daily_digest': {
+            'enabled': bool(daily_digest.get('enabled', False)),
+            'delivery_time': str(daily_digest.get('delivery_time') or '08:00').strip() or '08:00',
+            'channel': str(daily_digest.get('channel') or 'telegram').strip() or 'telegram',
+        },
+        'autoworkflow_base_url': str(autoworkflow.get('base_url') or 'http://127.0.0.1:8882').strip(),
+        'autoworkflow_api_token': str(autoworkflow.get('api_token') or '').strip(),
     }
 
 
@@ -874,11 +893,79 @@ class GatewayRunner:
         self._autonomy_scheduler_signature = current_signature
         return scheduler
 
+    def _get_or_create_desired_state_sweep(self):
+        from autonomy.desired_state_sweep import DesiredStateSweep
+        from autonomy.executors.autoworkflow_executor import AutoWorkflowExecutor
+        from autonomy.executors.codex_executor import CodexExecutor
+        from autonomy.executors.repo_executor import RepoExecutor
+        from autonomy.sensors.registry import SensorRegistry
+        from autonomy.store import AutonomyStore
+
+        cfg = self._autonomy_config()
+        sweep = getattr(self, '_desired_state_sweep', None)
+        current_signature = (
+            cfg['mode'],
+            cfg['tick_interval_minutes'],
+            cfg['max_actions_per_tick'],
+            tuple(cfg['allowed_domains']),
+            cfg.get('autoworkflow_base_url'),
+            bool(cfg.get('autoworkflow_api_token')),
+        )
+        if sweep is not None and getattr(self, '_desired_state_sweep_signature', None) == current_signature:
+            return sweep
+
+        store = AutonomyStore()
+        loop_handle = asyncio.get_running_loop()
+        registry = SensorRegistry.default(
+            autoworkflow_base_url=cfg.get('autoworkflow_base_url'),
+            autoworkflow_api_token=cfg.get('autoworkflow_api_token'),
+        )
+        sweep = DesiredStateSweep(
+            store=store,
+            sensor_registry=registry,
+            executors={
+                'repo_executor': RepoExecutor(),
+                'codex_executor': CodexExecutor(),
+                'autoworkflow_executor': AutoWorkflowExecutor(
+                    base_url=cfg.get('autoworkflow_base_url'),
+                    api_token=cfg.get('autoworkflow_api_token'),
+                ),
+            },
+            review_notifier=lambda review_id: loop_handle.create_task(
+                self._notify_autonomy_review_created(review_id)
+            ),
+            max_actions_per_tick=cfg['max_actions_per_tick'],
+        )
+        self._autonomy_store = store
+        self._desired_state_sweep = sweep
+        self._desired_state_sweep_signature = current_signature
+        return sweep
+
     async def _maybe_run_autonomy_scheduler_tick(self) -> list[str]:
         if not self._autonomy_enabled():
             return []
-        scheduler = self._get_or_create_autonomy_scheduler()
         cfg = self._autonomy_config()
+        messages: list[str] = []
+        if cfg.get('mode') == 'desired_state':
+            try:
+                sweep = self._get_or_create_desired_state_sweep()
+                result = await asyncio.to_thread(sweep.run)
+                for review_id in result.pending_reviews:
+                    await self._notify_autonomy_review_created(review_id)
+                messages.append(f"Sweep: {result.goals_checked} goals, {result.actions_taken} actions")
+            except Exception:
+                logger.exception('Desired-state autonomy sweep failed, falling back to legacy domain ticks')
+                messages.extend(await self._run_legacy_autonomy_ticks(cfg))
+        else:
+            messages.extend(await self._run_legacy_autonomy_ticks(cfg))
+
+        digest_message = await self._maybe_generate_and_deliver_daily_digest(cfg)
+        if digest_message:
+            messages.append(digest_message)
+        return messages
+
+    async def _run_legacy_autonomy_ticks(self, cfg: dict[str, Any]) -> list[str]:
+        scheduler = self._get_or_create_autonomy_scheduler()
         repo_path = Path(os.getenv('TERMINAL_CWD', os.getcwd()))
 
         def _run_triggers() -> list[str]:
@@ -890,6 +977,62 @@ class GatewayRunner:
             return messages
 
         return await asyncio.to_thread(_run_triggers)
+
+    async def _maybe_generate_and_deliver_daily_digest(self, cfg: dict[str, Any]) -> str | None:
+        digest_cfg = cfg.get('daily_digest') or {}
+        if not digest_cfg.get('enabled'):
+            return None
+
+        now_local = datetime.now().astimezone()
+        try:
+            hour_str, minute_str = str(digest_cfg.get('delivery_time') or '08:00').split(':', 1)
+            delivery_hour = max(0, min(23, int(hour_str)))
+            delivery_minute = max(0, min(59, int(minute_str)))
+        except (TypeError, ValueError):
+            delivery_hour = 8
+            delivery_minute = 0
+        if (now_local.hour, now_local.minute) < (delivery_hour, delivery_minute):
+            return None
+
+        store = getattr(self, '_autonomy_store', None)
+        should_close = False
+        if store is None:
+            from autonomy.store import AutonomyStore
+
+            store = AutonomyStore()
+            should_close = True
+        try:
+            date_key = now_local.date().isoformat()
+            try:
+                store.get_daily_digest(date_key)
+                return None
+            except KeyError:
+                pass
+            from autonomy.digest_delivery import format_digest_for_telegram
+            from autonomy.digest_generator import DigestGenerator
+
+            digest = await asyncio.to_thread(
+                DigestGenerator(store=store, now_fn=lambda: now_local).generate
+            )
+            await self._deliver_daily_digest(
+                format_digest_for_telegram(digest),
+                channel=str(digest_cfg.get('channel') or 'telegram'),
+            )
+            return f'Daily digest: {digest.date_key}'
+        finally:
+            if should_close:
+                store.close()
+
+    async def _deliver_daily_digest(self, message: str, *, channel: str) -> None:
+        if channel != 'telegram':
+            return
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if adapter is None:
+            return
+        home = self.config.get_home_channel(Platform.TELEGRAM)
+        if home is None or not home.chat_id:
+            return
+        await adapter.send(home.chat_id, message)
 
 
     async def _handle_review_queue_command(self, event: MessageEvent) -> str:
@@ -978,6 +1121,7 @@ class GatewayRunner:
         )
 
     async def _handle_gateway_autonomy_seed_command(self, event: MessageEvent) -> str:
+        from autonomy.seed import seed_desired_states
         from autonomy.store import AutonomyStore
 
         store = AutonomyStore()
@@ -1002,9 +1146,14 @@ class GatewayRunner:
                     verification_required=True,
                     max_parallelism=1,
                 )
+            seeded = seed_desired_states(store)
         finally:
             store.close()
-        return 'Seeded repo-health autonomy goal/policy for code_projects. Next: run /autonomy-run.'
+        return (
+            'Seeded repo-health autonomy goal/policy for code_projects. '
+            f"Desired states: {seeded['goals_created']} goals, {seeded['matrix_entries_created']} matrix entries, {seeded['policies_created']} policies. "
+            'Next: run /autonomy-run.'
+        )
 
     async def _handle_gateway_autonomy_run_command(self, event: MessageEvent) -> str:
         from autonomy.store import AutonomyStore

@@ -159,6 +159,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                "Tools & Skills", cli_only=True),
     CommandDef("goals", "Show stored autonomy goals", "Tools & Skills",
                cli_only=True),
+    CommandDef("goal-matrix", "Show goal-matrix entries grouped by desired state", "Tools & Skills",
+               cli_only=True, aliases=("goal_matrix",)),
     CommandDef("autonomy", "Show autonomy engine summary", "Tools & Skills",
                cli_only=True),
     CommandDef("autonomy-run", "Run one supervised autonomy tick for the current repo", "Tools & Skills"),

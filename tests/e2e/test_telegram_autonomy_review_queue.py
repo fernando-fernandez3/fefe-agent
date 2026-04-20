@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import Future
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -44,6 +44,7 @@ async def test_autonomy_seed_command_works_in_telegram(adapter, command_text):
     send.assert_called_once()
     response_text = send.call_args[1].get('content') or send.call_args[0][1]
     assert 'Seeded repo-health autonomy goal/policy for code_projects.' in response_text
+    assert 'Desired states:' in response_text
     assert 'run /autonomy-run' in response_text
 
 
@@ -142,9 +143,43 @@ async def test_autonomy_run_proactively_sends_review_packet(adapter, runner, mon
 
 
 @pytest.mark.asyncio
-async def test_autonomy_scheduler_tick_runs_allowed_domains(runner, monkeypatch):
+async def test_autonomy_scheduler_tick_runs_desired_state_sweep_and_notifies_reviews(runner, monkeypatch):
+    class FakeSweepResult:
+        goals_checked = 2
+        actions_taken = 1
+        pending_reviews = ['review_99']
+
+    class FakeSweep:
+        def run(self):
+            return FakeSweepResult()
+
+    notify = AsyncMock()
+    maybe_digest = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner, '_autonomy_enabled', lambda: True)
+    monkeypatch.setattr(runner, '_autonomy_config', lambda: {
+        'enabled': True,
+        'mode': 'desired_state',
+        'tick_interval_minutes': 15,
+        'max_actions_per_tick': 3,
+        'allowed_domains': ['code_projects', 'lab'],
+        'telegram_reviews_enabled': True,
+        'daily_digest': {'enabled': False},
+    })
+    monkeypatch.setattr(runner, '_get_or_create_desired_state_sweep', lambda: FakeSweep())
+    monkeypatch.setattr(runner, '_notify_autonomy_review_created', notify)
+    monkeypatch.setattr(runner, '_maybe_generate_and_deliver_daily_digest', maybe_digest)
+
+    messages = await runner._maybe_run_autonomy_scheduler_tick()
+
+    assert messages == ['Sweep: 2 goals, 1 actions']
+    notify.assert_awaited_once_with('review_99')
+    maybe_digest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_autonomy_scheduler_tick_falls_back_to_legacy_domains_when_sweep_fails(runner, monkeypatch):
     class FakeTickResult:
-        review_id = 'review_99'
+        review_id = 'review_77'
 
     class FakeScheduler:
         def __init__(self):
@@ -154,20 +189,61 @@ async def test_autonomy_scheduler_tick_runs_allowed_domains(runner, monkeypatch)
             self.calls.append((domain, repo_path))
             return MagicMock(ran=True, tick_result=FakeTickResult())
 
+    class FakeSweep:
+        def run(self):
+            raise RuntimeError('sweep blew up')
+
     fake_scheduler = FakeScheduler()
+    maybe_digest = AsyncMock(return_value=None)
     monkeypatch.setattr(runner, '_autonomy_enabled', lambda: True)
     monkeypatch.setattr(runner, '_autonomy_config', lambda: {
         'enabled': True,
+        'mode': 'desired_state',
         'tick_interval_minutes': 15,
+        'max_actions_per_tick': 3,
         'allowed_domains': ['code_projects', 'lab'],
         'telegram_reviews_enabled': True,
+        'daily_digest': {'enabled': False},
     })
+    monkeypatch.setattr(runner, '_get_or_create_desired_state_sweep', lambda: FakeSweep())
     monkeypatch.setattr(runner, '_get_or_create_autonomy_scheduler', lambda: fake_scheduler)
+    monkeypatch.setattr(runner, '_maybe_generate_and_deliver_daily_digest', maybe_digest)
 
     review_ids = await runner._maybe_run_autonomy_scheduler_tick()
 
-    assert review_ids == ['review_99', 'review_99']
+    assert review_ids == ['review_77', 'review_77']
     assert [call[0] for call in fake_scheduler.calls] == ['code_projects', 'lab']
+    maybe_digest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_is_delivered_after_scheduler_tick(runner, monkeypatch):
+    class FakeSweepResult:
+        goals_checked = 1
+        actions_taken = 0
+        pending_reviews = []
+
+    class FakeSweep:
+        def run(self):
+            return FakeSweepResult()
+
+    monkeypatch.setattr(runner, '_autonomy_enabled', lambda: True)
+    monkeypatch.setattr(runner, '_autonomy_config', lambda: {
+        'enabled': True,
+        'mode': 'desired_state',
+        'tick_interval_minutes': 15,
+        'max_actions_per_tick': 3,
+        'allowed_domains': ['code_projects'],
+        'telegram_reviews_enabled': True,
+        'daily_digest': {'enabled': True, 'delivery_time': '08:00', 'channel': 'telegram'},
+    })
+    monkeypatch.setattr(runner, '_get_or_create_desired_state_sweep', lambda: FakeSweep())
+    monkeypatch.setattr(runner, '_notify_autonomy_review_created', AsyncMock())
+    monkeypatch.setattr(runner, '_maybe_generate_and_deliver_daily_digest', AsyncMock(return_value='Daily digest: 2026-04-20'))
+
+    messages = await runner._maybe_run_autonomy_scheduler_tick()
+
+    assert messages == ['Sweep: 1 goals, 0 actions', 'Daily digest: 2026-04-20']
 
 
 def test_cron_ticker_invokes_autonomy_scheduler_tick(monkeypatch):

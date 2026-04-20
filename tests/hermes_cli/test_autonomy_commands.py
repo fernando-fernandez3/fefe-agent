@@ -95,6 +95,7 @@ def test_autonomy_commands_registered():
     assert '/review-approve' in COMMANDS
     assert '/review-reject' in COMMANDS
     assert '/goals' in COMMANDS
+    assert '/goal-matrix' in COMMANDS
     assert '/reviews' in COMMANDS
     assert '/opportunities' in COMMANDS
     assert resolve_command('autonomy').name == 'autonomy'
@@ -107,6 +108,8 @@ def test_autonomy_commands_registered():
     assert resolve_command('review-reject').name == 'review-reject'
     assert resolve_command('review_reject').name == 'review-reject'
     assert resolve_command('goals').name == 'goals'
+    assert resolve_command('goal-matrix').name == 'goal-matrix'
+    assert resolve_command('goal_matrix').name == 'goal-matrix'
     assert resolve_command('reviews').name == 'reviews'
     assert resolve_command('opportunities').name == 'opportunities'
 
@@ -119,6 +122,7 @@ def test_autonomy_commands_render_stored_state(tmp_path):
     with redirect_stdout(buffer):
         assert cli_obj.process_command('/autonomy') is True
         assert cli_obj.process_command('/goals') is True
+        assert cli_obj.process_command('/goal-matrix') is True
         assert cli_obj.process_command('/reviews') is True
         assert cli_obj.process_command('/opportunities') is True
 
@@ -130,6 +134,10 @@ def test_autonomy_commands_render_stored_state(tmp_path):
     assert 'Learnings captured: 1' in output
     assert 'Autonomy goals' in output
     assert '[active] Keep repo healthy' in output
+    assert 'horizon=ongoing' in output
+    assert 'matrix_entries=0' in output
+    assert 'Goal matrix' in output
+    assert 'No goal matrix entries stored.' in output
     assert 'Pending autonomy reviews' in output
     assert 'review_1' in output
     assert 'policy_requires_review' in output
@@ -158,6 +166,7 @@ def test_autonomy_seed_and_run_commands(tmp_path, monkeypatch):
 
     output = buffer.getvalue()
     assert 'Seeded repo-health autonomy goal/policy for code_projects.' in output
+    assert 'Desired states:' in output
     assert 'Autonomy tick: executed' in output
     assert 'Execution:' in output
     assert 'Learning:' in output
