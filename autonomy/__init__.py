@@ -1,5 +1,6 @@
 """Broad autonomy MVP package."""
 from .db import AutonomyDB
+from .evidence import Evidence
 from .execution_loop import AutonomyExecutionLoop, TickResult
 from .learning_engine import LearningEngine
 from .onboarding import GoalOnboarding, OnboardResult
@@ -28,6 +29,7 @@ from .executors import CodexExecutor
 
 __all__ = [
     'AutonomyDB',
+    'Evidence',
     'AutonomyStore',
     'AutonomyExecutionLoop',
     'TickResult',

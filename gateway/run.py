@@ -887,6 +887,7 @@ class GatewayRunner:
 
     def _get_or_create_desired_state_sweep(self):
         from autonomy.desired_state_sweep import DesiredStateSweep
+        from autonomy.executors.autoworkflow_executor import AutoWorkflowExecutor
         from autonomy.executors.codex_executor import CodexExecutor
         from autonomy.executors.repo_executor import RepoExecutor
         from autonomy.sensors.registry import SensorRegistry
@@ -917,6 +918,10 @@ class GatewayRunner:
             executors={
                 'repo_executor': RepoExecutor(),
                 'codex_executor': CodexExecutor(),
+                'autoworkflow_executor': AutoWorkflowExecutor(
+                    base_url=cfg.get('autoworkflow_base_url'),
+                    api_token=cfg.get('autoworkflow_api_token'),
+                ),
             },
             review_notifier=lambda review_id: loop_handle.create_task(
                 self._notify_autonomy_review_created(review_id)

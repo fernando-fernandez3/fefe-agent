@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import AutonomyDB
+from .evidence import Evidence
 from .models import DailyDigest, DelegationMode, Execution, ExecutionStatus, Goal, GoalMatrixEntry, GoalStatus, Learning, Opportunity, OpportunityStatus, Policy, Review, ReviewStatus, Signal, WorldStateRecord
 
 
@@ -886,6 +887,71 @@ class AutonomyStore:
             (limit,),
         )
         return [self.get_daily_digest(row['date_key']) for row in rows]
+
+    def create_evidence(
+        self,
+        *,
+        evidence_id: str,
+        opportunity_id: str,
+        goal_id: str,
+        source: str,
+        executor_run_id: str,
+        outcome: str,
+        artifacts: dict | None = None,
+        impact_summary: str = '',
+        recorded_at: str | None = None,
+    ) -> Evidence:
+        timestamp = recorded_at or utc_now_iso()
+        self.db.execute(
+            """
+            INSERT INTO evidence (
+                id, opportunity_id, goal_id, source, executor_run_id,
+                outcome, artifacts_json, impact_summary, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                opportunity_id,
+                goal_id,
+                source,
+                executor_run_id,
+                outcome,
+                json.dumps(artifacts or {}),
+                impact_summary,
+                timestamp,
+            ),
+        )
+        return self.get_evidence(evidence_id)
+
+    def get_evidence(self, evidence_id: str) -> Evidence:
+        row = self.db.fetchone('SELECT * FROM evidence WHERE id = ?', (evidence_id,))
+        if row is None:
+            raise KeyError(f'Evidence not found: {evidence_id}')
+        return Evidence(
+            id=row['id'],
+            opportunity_id=row['opportunity_id'],
+            goal_id=row['goal_id'],
+            source=row['source'],
+            executor_run_id=row['executor_run_id'],
+            outcome=row['outcome'],
+            artifacts=json.loads(row['artifacts_json']),
+            impact_summary=row['impact_summary'],
+            recorded_at=row['recorded_at'],
+        )
+
+    def list_evidence_by_goal(self, goal_id: str) -> list[Evidence]:
+        rows = self.db.fetchall(
+            'SELECT id FROM evidence WHERE goal_id = ? ORDER BY recorded_at DESC, id ASC',
+            (goal_id,),
+        )
+        return [self.get_evidence(row['id']) for row in rows]
+
+    def list_evidence_by_opportunity(self, opportunity_id: str) -> list[Evidence]:
+        rows = self.db.fetchall(
+            'SELECT id FROM evidence WHERE opportunity_id = ? ORDER BY recorded_at DESC, id ASC',
+            (opportunity_id,),
+        )
+        return [self.get_evidence(row['id']) for row in rows]
 
     def create_learning(
         self,

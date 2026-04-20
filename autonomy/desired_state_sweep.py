@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from autonomy.evidence import Evidence, record_evidence
 from autonomy.executors.base import BaseExecutor, ExecutionTask
 from autonomy.models import (
     DelegationMode,
@@ -478,6 +479,13 @@ class DesiredStateSweep:
                 else "execution_failed"
             )
 
+        if finalized.status == ExecutionStatus.COMPLETED:
+            self._record_execution_evidence(
+                goal=goal,
+                opportunity=opportunity,
+                execution=finalized,
+            )
+
         return SweepActionOutcome(
             opportunity_id=opportunity.id,
             goal_id=goal.id,
@@ -529,6 +537,48 @@ class DesiredStateSweep:
         return self.store.fail_execution(
             claimed.id, lease_owner=lease_owner, outcome=outcome
         )
+
+    def _record_execution_evidence(
+        self,
+        *,
+        goal: Goal,
+        opportunity: Opportunity,
+        execution: Execution,
+    ) -> None:
+        outcome = execution.outcome or {}
+        source = (
+            "autoworkflow_run"
+            if opportunity.delegation_mode == DelegationMode.AUTOWORKFLOW_RUN
+            else "direct_execution"
+        )
+        executor_run_id = str(outcome.get("run_id") or execution.id)
+        artifact_keys = ("response", "stdout", "stderr", "changed_files", "changed_count", "prompt")
+        artifacts = {key: outcome[key] for key in artifact_keys if key in outcome}
+        impact_summary = self._summarize_execution_impact(opportunity=opportunity, execution=execution)
+        record_evidence(
+            self.store,
+            Evidence(
+                id=f"evidence::{execution.id}",
+                opportunity_id=opportunity.id,
+                goal_id=goal.id,
+                source=source,
+                executor_run_id=executor_run_id,
+                outcome="success",
+                artifacts=artifacts,
+                impact_summary=impact_summary,
+                recorded_at=execution.completed_at or datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _summarize_execution_impact(*, opportunity: Opportunity, execution: Execution) -> str:
+        outcome = execution.outcome or {}
+        if opportunity.delegation_mode == DelegationMode.AUTOWORKFLOW_RUN:
+            run_id = outcome.get("run_id") or execution.id
+            return f"Launched AutoWorkflow run {run_id} for {opportunity.title}."
+        if outcome.get("changed_count") is not None:
+            return f"Completed {opportunity.title} with {outcome['changed_count']} changed files observed."
+        return f"Completed {opportunity.title}."
 
     @staticmethod
     def _resolve_repo_path(opportunity: Opportunity) -> Path | None:

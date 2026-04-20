@@ -163,6 +163,50 @@ def test_desired_state_sweep_creates_review_and_notifies_when_policy_requires_it
     store.close()
 
 
+def test_desired_state_sweep_records_evidence_after_successful_execution(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=[],
+    )
+    seed_goal_policy_and_entry(store, goal_id='goal_exec', priority=100, locator='/repo/exec')
+    registry = SensorRegistry(
+        {
+            'repo': LocatorSignalSensor(
+                {
+                    '/repo/exec': Signal(
+                        id='sig_exec',
+                        domain='code_projects',
+                        source_sensor='locator_signal_sensor',
+                        entity_type='repo',
+                        entity_key='/repo/exec',
+                        signal_type='dirty_worktree',
+                        signal_strength=0.7,
+                        evidence={'repo_path': '/repo/exec'},
+                    )
+                }
+            )
+        }
+    )
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=registry,
+        executors={'repo_executor': RecordingExecutor()},
+    )
+
+    result = sweep.run()
+
+    assert result.actions[0].status == 'executed'
+    evidence = store.list_evidence_by_goal('goal_exec')
+    assert len(evidence) == 1
+    assert evidence[0].opportunity_id == 'opp::code_projects::dirty_worktree::/repo/exec'
+    assert evidence[0].source == 'direct_execution'
+    store.close()
+
+
 def test_desired_state_sweep_skips_when_prior_run_still_holds_lock(tmp_path):
     store = AutonomyStore(tmp_path / 'autonomy.db')
     sweep = DesiredStateSweep(
