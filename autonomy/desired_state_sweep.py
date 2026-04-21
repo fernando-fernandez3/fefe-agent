@@ -221,8 +221,9 @@ class DesiredStateSweep:
         persisted: list[Signal] = []
         for emitted in sensor_result.signals:
             try:
+                unique_id = f"{emitted.id}:{uuid4().hex[:8]}"
                 stored = self.store.append_signal(
-                    signal_id=emitted.id,
+                    signal_id=unique_id,
                     domain=emitted.domain,
                     source_sensor=emitted.source_sensor,
                     entity_type=emitted.entity_type,
