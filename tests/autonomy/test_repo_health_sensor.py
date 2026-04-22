@@ -138,6 +138,44 @@ def test_repo_health_sensor_emits_failing_tests_signal_for_collection_errors(mon
     assert signal.evidence['check_mode'] == 'collect_only'
 
 
+def test_repo_health_sensor_emits_no_tests_configured_for_pytest_exit_5(monkeypatch, tmp_path):
+    """Regression: pytest returncode 5 means 'no tests collected' — a configuration
+    state, not a failure. Must NOT be reported as failing_tests, otherwise downstream
+    routing tries to codex_task-fix a repo that simply has no tests yet.
+    Reproduces the false-positive seen against embarka on 2026-04-21.
+    """
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'tests').mkdir()
+
+    def fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=False):
+        if command == ['git', 'status', '--porcelain']:
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout='', stderr='')
+        if command == ['pytest', '--collect-only', '-q']:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=5,
+                stdout='no tests collected in 0.05s\n',
+                stderr='',
+            )
+        raise AssertionError(f'unexpected command: {command}')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    monkeypatch.setattr(shutil, 'which', lambda name: '/usr/bin/pytest' if name == 'pytest' else None)
+
+    result = RepoHealthSensor().collect(SensorContext(domain='code_projects', repo_path=repo))
+
+    assert len(result.signals) == 1
+    signal = result.signals[0]
+    assert signal.signal_type == 'no_tests_configured'
+    assert signal.id == f'repo_health:no_tests_configured:{repo}'
+    assert signal.signal_strength == 0.2
+    assert signal.evidence['returncode'] == 5
+    assert signal.evidence['check_mode'] == 'collect_only'
+    assert signal.evidence['test_command'] == 'pytest --collect-only -q'
+    assert 'no tests collected' in signal.evidence['output_excerpt']
+
+
 @pytest.mark.parametrize(
     'package_json, expected_signal',
     [

@@ -148,6 +148,28 @@ class RepoHealthSensor(BaseSensor):
             return None
 
         combined_output = '\n'.join(part for part in (result.stdout.strip(), result.stderr.strip()) if part).strip()
+
+        if result.returncode == 5:
+            # pytest exit code 5 = "no tests collected" — a configuration state,
+            # not a failure. Repo has no tests wired up yet. Emit a distinct,
+            # low-strength informational signal so downstream routing doesn't
+            # try to "fix" failing tests that never existed.
+            return Signal(
+                id=f'{self.name}:no_tests_configured:{repo_path}',
+                domain=context.domain,
+                source_sensor=self.name,
+                entity_type='repo',
+                entity_key=str(repo_path),
+                signal_type='no_tests_configured',
+                signal_strength=0.2,
+                evidence={
+                    'test_command': ' '.join(command),
+                    'returncode': result.returncode,
+                    'check_mode': 'collect_only',
+                    'output_excerpt': combined_output[:500],
+                },
+            )
+
         failing_count = self._extract_failing_count(combined_output)
         return Signal(
             id=f'{self.name}:failing_tests:{repo_path}',

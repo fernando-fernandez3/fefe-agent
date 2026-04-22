@@ -29,6 +29,16 @@ class OpportunityEngine:
             context_cost = 0.3
             title = 'Review stale branch and decide next action'
             risk_level = 'low'
+        elif signal.signal_type == 'no_tests_configured':
+            # Informational only — repo has no test suite wired up. This is a
+            # configuration state, not a bug to fix. Keep score low so it sits
+            # below any real signal and doesn't consume an action slot.
+            confidence = 0.7
+            urgency = 0.2
+            expected_value = 0.25
+            context_cost = 0.35
+            title = 'Repo has no tests configured'
+            risk_level = 'low'
         else:
             confidence = min(1.0, signal.signal_strength)
             urgency = min(1.0, signal.signal_strength)
