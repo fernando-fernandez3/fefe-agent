@@ -590,6 +590,8 @@ class DesiredStateSweep:
             or signal_evidence.get("locator")
             or evidence.get("repo_path")
         )
+        if not candidate and evidence.get("entity_type") == "repo":
+            candidate = evidence.get("entity_key")
         if candidate:
             return Path(str(candidate))
         return None

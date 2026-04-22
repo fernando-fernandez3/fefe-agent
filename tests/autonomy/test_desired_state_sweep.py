@@ -223,3 +223,55 @@ def test_desired_state_sweep_skips_when_prior_run_still_holds_lock(tmp_path):
 
     assert result.status == 'skipped_locked'
     assert result.skipped_reason == 'sweep_in_progress'
+
+
+def test_desired_state_sweep_resolves_repo_path_from_entity_key_when_signal_evidence_omits_it(tmp_path):
+    """Regression: repo_health-style signals don't include repo_path in their evidence.
+
+    Without falling back to entity_key, codex_executor fails with 'missing_repo_path'
+    on every failing_tests sweep tick — seen in prod 2026-04-21 against embarka and
+    autoworkflow matrix entries.
+    """
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['codex_task'],
+        approval_required_for=[],
+    )
+    seed_goal_policy_and_entry(store, goal_id='goal_repo', priority=100, locator='/repo/fail')
+    registry = SensorRegistry(
+        {
+            'repo': LocatorSignalSensor(
+                {
+                    '/repo/fail': Signal(
+                        id='sig_repo_health_style',
+                        domain='code_projects',
+                        source_sensor='repo_health',
+                        entity_type='repo',
+                        entity_key='/repo/fail',
+                        signal_type='failing_tests',
+                        signal_strength=0.65,
+                        # NOTE: repo_path intentionally absent — matches real RepoHealthSensor output
+                        evidence={'test_command': 'pytest -q', 'failing_count': 1},
+                    )
+                }
+            )
+        }
+    )
+    executor = RecordingExecutor(name='codex_executor')
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=registry,
+        executors={'codex_executor': executor},
+    )
+
+    result = sweep.run()
+
+    assert result.actions_taken == 1, result.actions
+    assert result.actions[0].status == 'executed'
+    assert len(executor.tasks) == 1
+    assert executor.tasks[0].repo_path is not None
+    assert executor.tasks[0].repo_path.as_posix() == '/repo/fail'
+    store.close()
