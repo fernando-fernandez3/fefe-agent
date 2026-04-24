@@ -821,6 +821,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["reply_in_thread"] = platform_cfg["reply_in_thread"]
                 if "require_mention" in platform_cfg:
                     bridged["require_mention"] = platform_cfg["require_mention"]
+                if "require_mention_chats" in platform_cfg:
+                    bridged["require_mention_chats"] = platform_cfg["require_mention_chats"]
                 if "free_response_channels" in platform_cfg:
                     bridged["free_response_channels"] = platform_cfg["free_response_channels"]
                 if "mention_patterns" in platform_cfg:
@@ -993,6 +995,11 @@ def load_gateway_config() -> GatewayConfig:
                 _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
                 if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
                     os.environ["TELEGRAM_REQUIRE_MENTION"] = str(_effective_rm).lower()
+                require_mention_chats = telegram_cfg.get("require_mention_chats")
+                if require_mention_chats is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION_CHATS"):
+                    if isinstance(require_mention_chats, list):
+                        require_mention_chats = ",".join(str(v) for v in require_mention_chats)
+                    os.environ["TELEGRAM_REQUIRE_MENTION_CHATS"] = str(require_mention_chats)
                 if "mention_patterns" in telegram_cfg and not os.getenv("TELEGRAM_MENTION_PATTERNS"):
                     os.environ["TELEGRAM_MENTION_PATTERNS"] = json.dumps(telegram_cfg["mention_patterns"])
                 if "guest_mode" in telegram_cfg and not os.getenv("TELEGRAM_GUEST_MODE"):

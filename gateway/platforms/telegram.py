@@ -3751,14 +3751,32 @@ class TelegramAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("TELEGRAM_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
 
-    def _telegram_guest_mode(self) -> bool:
-        """Return whether non-allowlisted groups may trigger via direct @mention."""
-        configured = self.config.extra.get("guest_mode")
-        if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() in {"true", "1", "yes", "on"}
-            return bool(configured)
-        return os.getenv("TELEGRAM_GUEST_MODE", "false").lower() in {"true", "1", "yes", "on"}
+    def _telegram_require_mention_chats(self) -> set[str]:
+        raw = self.config.extra.get("require_mention_chats")
+        if raw is None:
+            raw = os.getenv("TELEGRAM_REQUIRE_MENTION_CHATS", "")
+        if isinstance(raw, list):
+            values = raw
+        else:
+            values = str(raw).split(",")
+        return {str(value).strip() for value in values if str(value).strip()}
+
+    def _chat_requires_mention(self, message: Message) -> bool:
+        if self._telegram_require_mention():
+            return True
+
+        chat_id = str(getattr(getattr(message, "chat", None), "id", "")).strip()
+        if not chat_id:
+            return False
+
+        targeted = self._telegram_require_mention_chats()
+        if not targeted:
+            return False
+        if chat_id in targeted:
+            return True
+
+        thread_id = getattr(message, "message_thread_id", None)
+        return thread_id is not None and f"{chat_id}:{thread_id}" in targeted
 
     def _telegram_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
@@ -3985,7 +4003,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         if chat_id_str in self._telegram_free_response_chats():
             return True
-        if not self._telegram_require_mention():
+        if not self._chat_requires_mention(message):
             return True
         if self._is_reply_to_bot(message):
             return True

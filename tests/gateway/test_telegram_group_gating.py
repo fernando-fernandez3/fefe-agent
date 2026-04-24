@@ -12,8 +12,7 @@ def _make_adapter(
     ignored_threads=None,
     allow_from=None,
     group_allow_from=None,
-    allowed_chats=None,
-    guest_mode=None,
+    require_mention_chats=None,
 ):
     from gateway.platforms.telegram import TelegramAdapter
 
@@ -30,10 +29,8 @@ def _make_adapter(
         extra["allow_from"] = allow_from
     if group_allow_from is not None:
         extra["group_allow_from"] = group_allow_from
-    if allowed_chats is not None:
-        extra["allowed_chats"] = allowed_chats
-    if guest_mode is not None:
-        extra["guest_mode"] = guest_mode
+    if require_mention_chats is not None:
+        extra["require_mention_chats"] = require_mention_chats
 
     adapter = object.__new__(TelegramAdapter)
     adapter.platform = Platform.TELEGRAM
@@ -149,6 +146,23 @@ def test_group_messages_can_require_direct_trigger_via_config():
     assert adapter_no_mention._should_process_message(_group_message("/status"), is_command=True) is True
 
 
+def test_require_mention_chats_only_affects_listed_chat_ids():
+    adapter = _make_adapter(require_mention=False, require_mention_chats=["-200"])
+
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-199)) is True
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200)) is False
+    assert adapter._should_process_message(
+        _group_message("hi @hermes_bot", chat_id=-200, entities=[_mention_entity("hi @hermes_bot")])
+    ) is True
+
+
+def test_require_mention_chats_support_chat_thread_targets():
+    adapter = _make_adapter(require_mention=False, require_mention_chats=["-200:31"])
+
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=30)) is True
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=31)) is False
+
+
 def test_free_response_chats_bypass_mention_requirement():
     adapter = _make_adapter(require_mention=True, free_response_chats=["-200"])
 
@@ -232,7 +246,9 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
     (hermes_home / "config.yaml").write_text(
         "telegram:\n"
         "  require_mention: true\n"
-        "  guest_mode: true\n"
+        "  require_mention_chats:\n"
+        "    - \"-555\"\n"
+        "    - \"-555:31\"\n"
         "  mention_patterns:\n"
         "    - \"^\\\\s*chompy\\\\b\"\n"
         "  free_response_chats:\n"
@@ -242,6 +258,7 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("TELEGRAM_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("TELEGRAM_REQUIRE_MENTION_CHATS", raising=False)
     monkeypatch.delenv("TELEGRAM_MENTION_PATTERNS", raising=False)
     monkeypatch.delenv("TELEGRAM_GUEST_MODE", raising=False)
     monkeypatch.delenv("TELEGRAM_FREE_RESPONSE_CHATS", raising=False)
@@ -249,8 +266,9 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
+    assert config.platforms[Platform.TELEGRAM].extra["require_mention_chats"] == ["-555", "-555:31"]
     assert __import__("os").environ["TELEGRAM_REQUIRE_MENTION"] == "true"
-    assert __import__("os").environ["TELEGRAM_GUEST_MODE"] == "true"
+    assert __import__("os").environ["TELEGRAM_REQUIRE_MENTION_CHATS"] == "-555,-555:31"
     assert json.loads(__import__("os").environ["TELEGRAM_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
     assert __import__("os").environ["TELEGRAM_FREE_RESPONSE_CHATS"] == "-123"
     tg_cfg = config.platforms.get(Platform.TELEGRAM)
