@@ -275,3 +275,62 @@ def test_desired_state_sweep_resolves_repo_path_from_entity_key_when_signal_evid
     assert executor.tasks[0].repo_path is not None
     assert executor.tasks[0].repo_path.as_posix() == '/repo/fail'
     store.close()
+
+
+def test_desired_state_sweep_persists_matrix_entry_context_into_opportunity_evidence(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=[],
+    )
+    store.create_goal(
+        goal_id='goal_embarka',
+        title='Embarka',
+        domain='code_projects',
+        priority=100,
+    )
+    store.add_goal_matrix_entry(
+        entry_id='entry_embarka_workflow',
+        goal_id='goal_embarka',
+        asset_type='workflow',
+        label='Feedback loop',
+        locator='autoworkflow://embarka/feedback',
+        metadata={'subdomain': 'discovery_cadence'},
+    )
+    registry = SensorRegistry(
+        {
+            'workflow': LocatorSignalSensor(
+                {
+                    'autoworkflow://embarka/feedback': Signal(
+                        id='sig_feedback_failed',
+                        domain='code_projects',
+                        source_sensor='locator_signal_sensor',
+                        entity_type='workflow',
+                        entity_key='autoworkflow://embarka/feedback',
+                        signal_type='workflows_failed',
+                        signal_strength=0.8,
+                        evidence={'failed_count': 1},
+                    )
+                }
+            )
+        }
+    )
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=registry,
+        executors={'repo_executor': RecordingExecutor()},
+    )
+
+    result = sweep.run()
+
+    assert result.actions[0].status == 'review_required'
+    opportunity = store.get_opportunity(
+        'opp::code_projects::workflows_failed::autoworkflow://embarka/feedback'
+    )
+    assert opportunity.evidence['matrix_entry_id'] == 'entry_embarka_workflow'
+    assert opportunity.evidence['asset_label'] == 'Feedback loop'
+    assert opportunity.evidence['subdomain'] == 'discovery_cadence'
+    store.close()

@@ -9,6 +9,7 @@ from .base import BaseSensor
 from .file_freshness import FileFreshnessSensor
 from .repo_health import RepoHealthSensor
 from .system_status import SystemStatusSensor
+from .url_status import URLStatusSensor
 
 
 SensorFactory = Callable[[], BaseSensor]
@@ -43,5 +44,6 @@ class SensorRegistry:
                 ),
                 "doc": FileFreshnessSensor(),
                 "system": SystemStatusSensor(),
+                "url": URLStatusSensor(),
             }
         )

@@ -16,6 +16,7 @@ _FAILED_COUNT_RE = re.compile(r'(\d+)\s+failed\b', re.IGNORECASE)
 _NEXT_JS_RE = re.compile(r'\bnext\b', re.IGNORECASE)
 _GIT_STATUS_TIMEOUT_SECONDS = 5
 _PYTEST_COLLECTION_TIMEOUT_SECONDS = 30
+_PYTEST_SMOKE_TIMEOUT_SECONDS = 30
 
 
 class RepoHealthSensor(BaseSensor):
@@ -42,6 +43,10 @@ class RepoHealthSensor(BaseSensor):
             collect_signal = self._run_pytest_collection_check(context, repo_path, metadata)
             if collect_signal is not None:
                 signals.append(collect_signal)
+            else:
+                smoke_signal = self._run_pytest_smoke_check(context, repo_path, metadata)
+                if smoke_signal is not None:
+                    signals.append(smoke_signal)
 
         if metadata.get('requires_browser_qa'):
             signals.append(
@@ -188,6 +193,47 @@ class RepoHealthSensor(BaseSensor):
             },
         )
 
+    def _run_pytest_smoke_check(self, context: SensorContext, repo_path: Path, metadata: dict) -> Signal | None:
+        command = metadata['smoke_command']
+        try:
+            result = subprocess.run(
+                command,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=_PYTEST_SMOKE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return self._build_missing_test_command_signal(
+                context,
+                repo_path,
+                {'framework': 'pytest', 'reason': 'pytest_not_installed'},
+            )
+
+        if result.returncode == 0:
+            return None
+
+        combined_output = '\n'.join(part for part in (result.stdout.strip(), result.stderr.strip()) if part).strip()
+        failing_count = self._extract_failing_count(combined_output)
+        return Signal(
+            id=f'{self.name}:failing_tests:{repo_path}',
+            domain=context.domain,
+            source_sensor=self.name,
+            entity_type='repo',
+            entity_key=str(repo_path),
+            signal_type='failing_tests',
+            signal_strength=min(1.0, 0.55 + (0.1 * failing_count)),
+            evidence={
+                'test_command': ' '.join(command),
+                'returncode': result.returncode,
+                'failing_count': failing_count,
+                'output_excerpt': combined_output[:500],
+                'check_mode': 'maxfail_1',
+            },
+        )
+
     def _detect_test_command(self, repo_path: Path) -> tuple[list[str] | None, dict]:
         if self._is_pytest_repo(repo_path):
             if shutil.which('pytest') is None:
@@ -196,6 +242,7 @@ class RepoHealthSensor(BaseSensor):
                 'framework': 'pytest',
                 'requires_browser_qa': False,
                 'collect_command': ['pytest', '--collect-only', '-q'],
+                'smoke_command': ['pytest', '-q', '--maxfail=1'],
             }
 
         package_json = repo_path / 'package.json'

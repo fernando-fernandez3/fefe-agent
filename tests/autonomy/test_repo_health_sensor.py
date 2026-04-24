@@ -48,6 +48,8 @@ def test_repo_health_sensor_does_not_execute_full_test_suite(monkeypatch, tmp_pa
             return subprocess.CompletedProcess(args=command, returncode=0, stdout='', stderr='')
         if command == ['pytest', '--collect-only', '-q']:
             return subprocess.CompletedProcess(args=command, returncode=0, stdout='no tests collected\n', stderr='')
+        if command == ['pytest', '-q', '--maxfail=1']:
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout='1 passed in 0.01s\n', stderr='')
         raise AssertionError(f'unexpected command: {command}')
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
@@ -58,6 +60,7 @@ def test_repo_health_sensor_does_not_execute_full_test_suite(monkeypatch, tmp_pa
     assert result.signals == []
     assert ['pytest', '-q'] not in commands
     assert ['pytest', '--collect-only', '-q'] in commands
+    assert ['pytest', '-q', '--maxfail=1'] in commands
 
 
 def test_repo_health_sensor_emits_test_collection_slow_signal_when_collection_times_out(monkeypatch, tmp_path):

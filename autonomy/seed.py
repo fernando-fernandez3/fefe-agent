@@ -13,11 +13,59 @@ SEED_DESIRED_STATES = [
         'horizon': '3_months',
         'why_it_matters': 'Top business priority. Revenue potential.',
         'success_signals': ['revenue', 'active users', 'shipped features weekly'],
-        'constraints': {'no_deploy_without_review': True},
+        'constraints': {
+            'no_deploy_without_review': True,
+            'knowledge_skill': 'goals-context/ds_embarka_business',
+            'subdomains': [
+                'trip_creation_ux',
+                'family_differentiation',
+                'retention_repeat_planning',
+                'revenue_readiness',
+                'discovery_cadence',
+            ],
+        },
         'matrix_entries': [
-            {'id': 'matrix_embarka_repo', 'asset_type': 'repo', 'label': 'Embarka repo', 'locator': '/home/fefernandez/embarka'},
-            {'id': 'matrix_embarka_competitor_gap', 'asset_type': 'workflow', 'label': 'Competitor gap scanner', 'locator': 'autoworkflow://embarka/competitor-gap-issues'},
-            {'id': 'matrix_embarka_feedback', 'asset_type': 'workflow', 'label': 'Feedback loop', 'locator': 'autoworkflow://embarka/feedback'},
+            {
+                'id': 'matrix_embarka_repo',
+                'asset_type': 'repo',
+                'label': 'Embarka repo',
+                'locator': '/home/fefernandez/embarka',
+                'metadata': {'subdomain': 'trip_creation_ux'},
+            },
+            {
+                'id': 'matrix_embarka_competitor_gap',
+                'asset_type': 'workflow',
+                'label': 'Competitor gap scanner',
+                'locator': 'autoworkflow://embarka/competitor-gap-issues',
+                'metadata': {
+                    'subdomain': 'family_differentiation',
+                    'workspace': '/home/fefernandez/embarka/.autoworkflow/competitor-gap-issues',
+                    'candidates_path': '/home/fefernandez/embarka/.autoworkflow/competitor-gap-issues/candidates.json',
+                    'discovered_path': '/home/fefernandez/embarka/.autoworkflow/competitor-gap-issues/discovered.jsonl',
+                    'audit_summary_path': '/home/fefernandez/embarka/.autoworkflow/daily-audit/audit-summary.json',
+                },
+            },
+            {
+                'id': 'matrix_embarka_feedback',
+                'asset_type': 'workflow',
+                'label': 'Feedback loop',
+                'locator': 'autoworkflow://embarka/feedback',
+                'metadata': {
+                    'subdomain': 'discovery_cadence',
+                    'workspace': '/home/fefernandez/autoworkflow/.autoworkflow/feedback/embarka-intake',
+                    'candidates_path': '/home/fefernandez/autoworkflow/.autoworkflow/feedback/embarka-intake/candidates.json',
+                    'discovered_path': '/home/fefernandez/autoworkflow/.autoworkflow/feedback/embarka-intake/discovered.jsonl',
+                    'proposal_path': '/home/fefernandez/autoworkflow/.autoworkflow/feedback/embarka-intake/draft-remediation-proposal.md',
+                    'review_packet_path': '/home/fefernandez/autoworkflow/.autoworkflow/feedback/embarka-intake/weekly-product-risks.md',
+                },
+            },
+            {
+                'id': 'matrix_embarka_live',
+                'asset_type': 'url',
+                'label': 'Embarka live site',
+                'locator': 'https://embarka.ai',
+                'metadata': {'subdomain': 'trip_creation_ux'},
+            },
         ],
     },
     {
@@ -138,6 +186,7 @@ def seed_desired_states(store) -> dict:
                     asset_type=entry['asset_type'],
                     label=entry['label'],
                     locator=entry['locator'],
+                    metadata=entry.get('metadata'),
                 )
                 matrix_entries_created += 1
 

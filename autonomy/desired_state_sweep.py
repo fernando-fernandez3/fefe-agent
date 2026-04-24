@@ -230,7 +230,16 @@ class DesiredStateSweep:
                     entity_key=emitted.entity_key,
                     signal_type=emitted.signal_type,
                     signal_strength=emitted.signal_strength,
-                    evidence={**emitted.evidence, "goal_id": goal.id},
+                    evidence={
+                        **emitted.evidence,
+                        "goal_id": goal.id,
+                        "matrix_entry_id": entry.id,
+                        "asset_type": entry.asset_type,
+                        "asset_label": entry.label,
+                        "locator": entry.locator,
+                        "asset_metadata": dict(entry.metadata or {}),
+                        "subdomain": (entry.metadata or {}).get("subdomain"),
+                    },
                 )
                 self.projector.project_signal(self.store, stored)
                 persisted.append(stored)
@@ -265,6 +274,8 @@ class DesiredStateSweep:
                         signal.id,
                     )
                     errors.append(f"opportunity_upsert_failed:{signal.id}:{exc}")
+                    continue
+                if opportunity is None:
                     continue
                 weighted = self._weighted_score(goal=goal, opportunity=opportunity)
                 opportunity = self._persist_ranking_inputs(
