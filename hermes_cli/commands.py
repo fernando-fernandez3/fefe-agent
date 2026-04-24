@@ -520,6 +520,40 @@ _clamp_telegram_names = _clamp_command_names
 # Shared skill/plugin collection for gateway platforms
 # ---------------------------------------------------------------------------
 
+def _collect_quick_command_entries(
+    reserved_names: set[str],
+    desc_limit: int = 100,
+    sanitize_name: "Callable[[str], str] | None" = None,
+) -> list[tuple[str, str]]:
+    """Collect configured quick commands for gateway command menus."""
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config()
+    except Exception:
+        return []
+
+    quick_commands = cfg.get("quick_commands", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(quick_commands, dict):
+        return []
+
+    entries: list[tuple[str, str]] = []
+    for raw_name in sorted(quick_commands):
+        spec = quick_commands.get(raw_name)
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("type") not in {"exec", "alias"}:
+            continue
+        name = sanitize_name(raw_name) if sanitize_name else raw_name
+        if not name:
+            continue
+        desc = str(spec.get("description") or "Quick command")
+        if len(desc) > desc_limit:
+            desc = desc[:desc_limit - 3] + "..."
+        entries.append((name, desc))
+
+    return _clamp_command_names(entries, reserved_names)
+
+
 def _collect_gateway_skill_entries(
     platform: str,
     max_slots: int,
@@ -654,6 +688,15 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     core_commands = list(telegram_bot_commands())
     reserved_names = {n for n, _ in core_commands}
     all_commands = list(core_commands)
+
+    remaining_slots = max(0, max_commands - len(all_commands))
+    quick_commands = _collect_quick_command_entries(
+        reserved_names=reserved_names,
+        desc_limit=40,
+        sanitize_name=_sanitize_telegram_name,
+    )[:remaining_slots]
+    all_commands.extend(quick_commands)
+    reserved_names.update(n for n, _ in quick_commands)
 
     remaining_slots = max(0, max_commands - len(all_commands))
     entries, hidden_count = _collect_gateway_skill_entries(

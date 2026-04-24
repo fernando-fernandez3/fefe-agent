@@ -802,6 +802,27 @@ class TestTelegramMenuCommands:
                 f"Command '{name}' is {len(name)} chars (limit {_TG_NAME_LIMIT})"
             )
 
+    def test_includes_configured_quick_commands(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "quick_commands:\n"
+            "  fefe-sync:\n"
+            "    type: exec\n"
+            "    command: /tmp/fefe-sync.sh\n"
+            "    description: Run fefe-agent sync guard now\n"
+            "  bad-command!:\n"
+            "    type: exec\n"
+            "    command: /tmp/bad.sh\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        commands, hidden_count = telegram_menu_commands(max_commands=100)
+        by_name = dict(commands)
+
+        assert hidden_count >= 0
+        assert by_name["fefe_sync"] == "Run fefe-agent sync guard now"
+        assert by_name["bad_command"] == "Quick command"
+
     def test_includes_plugin_commands_via_lazy_discovery(self, tmp_path, monkeypatch):
         """Telegram menu generation should discover plugin slash commands on first access."""
         from unittest.mock import patch
