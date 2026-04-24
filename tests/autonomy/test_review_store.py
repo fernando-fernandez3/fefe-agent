@@ -48,62 +48,6 @@ def test_create_and_list_pending_reviews(tmp_path):
     store.close()
 
 
-def test_create_review_reuses_pending_review_for_same_opportunity(tmp_path):
-    store = AutonomyStore(tmp_path / 'autonomy.db')
-    seed_execution(store, 'exec_1')
-    seed_execution(store, 'exec_2')
-
-    first = store.create_review(
-        review_id='review_1',
-        execution_id='exec_1',
-        domain='code_projects',
-        review_type='policy_gate',
-        reason='delegated_to_hermes_review',
-        payload={'opportunity_id': 'opp_1', 'title': 'Fix thing'},
-    )
-    second = store.create_review(
-        review_id='review_2',
-        execution_id='exec_2',
-        domain='code_projects',
-        review_type='policy_gate',
-        reason='delegated_to_hermes_review',
-        payload={'opportunity_id': 'opp_1', 'title': 'Fix thing again'},
-    )
-
-    assert second.id == first.id
-    pending = store.list_pending_reviews(domain='code_projects')
-    assert [item.id for item in pending] == ['review_1']
-    store.close()
-
-
-def test_create_review_allows_new_review_after_prior_opportunity_review_resolved(tmp_path):
-    store = AutonomyStore(tmp_path / 'autonomy.db')
-    seed_execution(store, 'exec_1')
-    seed_execution(store, 'exec_2')
-    store.create_review(
-        review_id='review_1',
-        execution_id='exec_1',
-        domain='code_projects',
-        review_type='policy_gate',
-        reason='delegated_to_hermes_review',
-        payload={'opportunity_id': 'opp_1'},
-    )
-    store.resolve_review('review_1', ReviewStatus.CANCELLED)
-
-    second = store.create_review(
-        review_id='review_2',
-        execution_id='exec_2',
-        domain='code_projects',
-        review_type='policy_gate',
-        reason='delegated_to_hermes_review',
-        payload={'opportunity_id': 'opp_1'},
-    )
-
-    assert second.id == 'review_2'
-    assert [item.id for item in store.list_pending_reviews(domain='code_projects')] == ['review_2']
-    store.close()
-
-
 def test_resolve_review(tmp_path):
     store = AutonomyStore(tmp_path / 'autonomy.db')
     seed_execution(store)

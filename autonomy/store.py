@@ -776,24 +776,6 @@ class AutonomyStore:
         payload: dict,
         status: ReviewStatus = ReviewStatus.PENDING,
     ) -> Review:
-        if status == ReviewStatus.PENDING:
-            existing = self._find_pending_review_for_opportunity(
-                domain=domain,
-                review_type=review_type,
-                payload=payload,
-            )
-            if existing is not None:
-                if execution_id != existing.execution_id:
-                    self.cancel_execution(
-                        execution_id,
-                        outcome={
-                            'status': 'duplicate_review_suppressed',
-                            'existing_review_id': existing.id,
-                            'existing_execution_id': existing.execution_id,
-                        },
-                    )
-                return existing
-
         now = utc_now_iso()
         self.db.execute(
             """
@@ -815,34 +797,6 @@ class AutonomyStore:
             ),
         )
         return self.get_review(review_id)
-
-    def _find_pending_review_for_opportunity(
-        self,
-        *,
-        domain: str,
-        review_type: str,
-        payload: dict,
-    ) -> Review | None:
-        opportunity_id = payload.get('opportunity_id')
-        if not opportunity_id:
-            return None
-        rows = self.db.fetchall(
-            """
-            SELECT id, payload_json
-            FROM reviews
-            WHERE status = ? AND domain = ? AND review_type = ?
-            ORDER BY created_at ASC
-            """,
-            (ReviewStatus.PENDING.value, domain, review_type),
-        )
-        for row in rows:
-            try:
-                existing_payload = json.loads(row['payload_json'] or '{}')
-            except json.JSONDecodeError:
-                continue
-            if existing_payload.get('opportunity_id') == opportunity_id:
-                return self.get_review(row['id'])
-        return None
 
     def get_review(self, review_id: str) -> Review:
         row = self.db.fetchone('SELECT * FROM reviews WHERE id = ?', (review_id,))
