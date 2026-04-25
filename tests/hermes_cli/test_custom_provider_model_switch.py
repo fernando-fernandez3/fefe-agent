@@ -53,10 +53,7 @@ class TestCustomProviderModelSwitch:
 
         # fetch_api_models MUST be called even though model was saved
         mock_fetch.assert_called_once_with(
-            "sk-test",
-            "https://vllm.example.com/v1",
-            timeout=8.0,
-            api_mode=None,
+            "sk-test", "https://vllm.example.com/v1", timeout=8.0, api_mode=None
         )
 
     def test_can_switch_to_different_model(self, config_home):
