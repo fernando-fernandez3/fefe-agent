@@ -40,8 +40,8 @@ class AutoWorkflowStatusSensor(BaseSensor):
         metadata: dict[str, Any] = {"base_url": self.base_url}
 
         try:
-            review_items = self._fetch_json("/api/review-queue") or []
-            workflows = self._fetch_json("/api/workflows") or []
+            review_items = self._collection_items(self._fetch_json("/api/review-queue"))
+            workflows = self._collection_items(self._fetch_json("/api/workflows"))
         except (httpx.HTTPError, OSError) as exc:
             metadata["status"] = "autoworkflow_unreachable"
             metadata["error"] = str(exc)
@@ -139,8 +139,19 @@ class AutoWorkflowStatusSensor(BaseSensor):
             return response.json()
 
     @staticmethod
+    def _collection_items(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            items = payload.get("items")
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        return []
+
+    @staticmethod
     def _is_pending(item: dict) -> bool:
-        status = str(item.get("status") or "").lower()
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        status = str(item.get("status") or data.get("status") or "").lower()
         return status in {"pending", "awaiting_review", "needs_review", "open"}
 
     @staticmethod
