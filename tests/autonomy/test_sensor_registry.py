@@ -214,6 +214,43 @@ def test_autoworkflow_status_sensor_reads_competitor_artifacts_for_structured_th
     assert 'competitor_collaboration_feature_threat' in signal_types
     assert 'competitor_budget_visibility_threat' in signal_types
     assert 'competitor_trip_change_management_threat' in signal_types
+    collaboration_signal = next(
+        signal for signal in result.signals
+        if signal.signal_type == 'competitor_collaboration_feature_threat'
+    )
+    assert collaboration_signal.evidence['candidate_keys'] == [
+        'shared-trip-link',
+        'trip-plan-budget-rollup',
+        'trip-plan-version-history',
+    ]
+    collaboration_matches = collaboration_signal.evidence['matches']
+    assert collaboration_matches
+    assert any(
+        match['source_type'] == 'candidates'
+        and match['candidate_key'] == 'shared-trip-link'
+        and match['matched_keys'] == ['shared-trip-link']
+        and match['source_path'].endswith('candidates.json')
+        and match['snippet']
+        for match in collaboration_matches
+    )
+    assert any(
+        match['source_type'] == 'discovered'
+        and match['title'] == 'Group travel collaboration'
+        and 'shared itinerary' in match['matched_keywords']
+        and match['source_path'].endswith('discovered.jsonl')
+        and match['snippet']
+        for match in collaboration_matches
+    )
+
+    budget_signal = next(
+        signal for signal in result.signals
+        if signal.signal_type == 'competitor_budget_visibility_threat'
+    )
+    assert budget_signal.evidence['matches']
+    assert all(
+        match.get('candidate_key') != 'shared-trip-link'
+        for match in budget_signal.evidence['matches']
+    )
 
 
 def test_autoworkflow_status_sensor_reads_feedback_artifacts_for_structured_gaps(tmp_path):
@@ -266,3 +303,52 @@ def test_autoworkflow_status_sensor_reads_feedback_artifacts_for_structured_gaps
     assert 'feedback_booking_confidence_gap' in signal_types
     collaboration_signal = next(signal for signal in result.signals if signal.signal_type == 'feedback_collaboration_gap')
     assert collaboration_signal.evidence['artifact_paths']['review_packet'].endswith('weekly-product-risks.md')
+
+
+def test_autoworkflow_status_sensor_reads_feedback_candidate_keys_from_candidates_json(tmp_path):
+    workspace = tmp_path / 'embarka-intake'
+    workspace.mkdir()
+    (workspace / 'candidates.json').write_text(
+        '[{"candidate_key":"shared-trip-link","title":"Shared trip collaboration"},'
+        '{"candidate_key":"family-logistics-gap","title":"Family logistics planning"}]'
+    )
+    (workspace / 'discovered.jsonl').write_text(
+        '{"title":"Booking confidence","body":"Users need confidence before booking.","canonical_key":"booking-confidence-gap"}\n'
+    )
+    sensor = AutoWorkflowStatusSensor(base_url='http://aw.local', http_client=FakeHttpClient({
+        'http://aw.local/api/review-queue': [],
+        'http://aw.local/api/workflows': [],
+    }))
+
+    result = sensor.collect(
+        SensorContext(
+            domain='code_projects',
+            metadata={
+                'locator': 'autoworkflow://embarka/feedback',
+                'workspace': str(workspace),
+                'candidates_path': str(workspace / 'candidates.json'),
+                'discovered_path': str(workspace / 'discovered.jsonl'),
+            },
+        )
+    )
+
+    signal_types = [signal.signal_type for signal in result.signals]
+    assert 'feedback_collaboration_gap' in signal_types
+    assert 'feedback_family_logistics_gap' in signal_types
+    assert 'feedback_booking_confidence_gap' in signal_types
+
+    collaboration_signal = next(
+        signal for signal in result.signals
+        if signal.signal_type == 'feedback_collaboration_gap'
+    )
+    assert collaboration_signal.evidence['candidate_keys'] == [
+        'family-logistics-gap',
+        'shared-trip-link',
+    ]
+    assert collaboration_signal.evidence['canonical_keys'] == ['booking-confidence-gap']
+    assert any(
+        match['source_type'] == 'candidates'
+        and match['candidate_key'] == 'shared-trip-link'
+        and match['matched_keys'] == ['shared-trip-link']
+        for match in collaboration_signal.evidence['matches']
+    )
