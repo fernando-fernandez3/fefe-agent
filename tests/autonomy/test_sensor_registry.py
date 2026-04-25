@@ -95,6 +95,42 @@ def test_autoworkflow_status_sensor_emits_pending_failed_and_running_signals():
     assert pending.evidence['item_ids'] == ['review_1']
 
 
+def test_autoworkflow_status_sensor_accepts_paginated_review_queue_payload():
+    base_url = 'http://aw.local'
+    client = FakeHttpClient(
+        {
+            f'{base_url}/api/review-queue': {
+                'items': [
+                    {
+                        'id': 'review_1',
+                        'type': 'review_item',
+                        'workflow_name': 'embarka-feedback-intake',
+                        'data': {'status': 'awaiting_review'},
+                        'summary': 'Embarka feedback item needs review',
+                    }
+                ],
+                'total': 1,
+                'counts': {'awaiting_review': 1},
+            },
+            f'{base_url}/api/workflows': {'items': []},
+        }
+    )
+    sensor = AutoWorkflowStatusSensor(base_url=base_url, http_client=client)
+
+    result = sensor.collect(
+        SensorContext(
+            domain='code_projects',
+            metadata={'locator': 'autoworkflow://embarka/feedback'},
+        )
+    )
+
+    signal_types = [signal.signal_type for signal in result.signals]
+    assert 'workflows_pending_review' in signal_types
+    pending = next(signal for signal in result.signals if signal.signal_type == 'workflows_pending_review')
+    assert pending.evidence['pending_count'] == 1
+    assert pending.evidence['item_ids'] == ['review_1']
+
+
 def test_autoworkflow_status_sensor_emits_structured_feedback_and_competitor_signals():
     base_url = 'http://aw.local'
     client = FakeHttpClient(
