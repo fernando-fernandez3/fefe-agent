@@ -61,12 +61,82 @@ class ReviewPacketFormatter:
         if not evidence:
             return []
 
+        def _join_values(values: object) -> str | None:
+            if isinstance(values, list):
+                return ', '.join(str(value) for value in values if value)
+            if isinstance(values, dict):
+                return ', '.join(str(value) for value in values.values() if value)
+            if values:
+                return str(values)
+            return None
+
         summary: list[str] = []
         signal_type = evidence.get('signal_type')
         if signal_type:
             summary.append(f'signal: {signal_type}')
 
         signal_evidence = evidence.get('signal_evidence', {})
+        matches = signal_evidence.get('matches') or []
+        first_match = matches[0] if matches and isinstance(matches[0], dict) else {}
+
+        artifact_paths = signal_evidence.get('artifact_paths') or []
+        artifact_path_fallback = None
+        if isinstance(artifact_paths, dict):
+            artifact_path_fallback = next((str(value) for value in artifact_paths.values() if value), None)
+        elif isinstance(artifact_paths, list):
+            artifact_path_fallback = str(artifact_paths[0]) if artifact_paths else None
+        elif artifact_paths:
+            artifact_path_fallback = str(artifact_paths)
+        artifact_source = first_match.get('source_path') or artifact_path_fallback
+        if artifact_source:
+            source_details = []
+            source_type = first_match.get('source_type')
+            if source_type:
+                source_details.append(str(source_type))
+            title = first_match.get('title')
+            if title:
+                source_details.append(str(title))
+            detail_text = f" ({'; '.join(source_details)})" if source_details else ''
+            summary.append(f'artifact source file: {artifact_source}{detail_text}')
+
+        candidate_keys = _join_values(signal_evidence.get('candidate_keys') or first_match.get('candidate_key'))
+        if candidate_keys:
+            summary.append(f'candidate keys: {candidate_keys}')
+
+        canonical_keys = _join_values(signal_evidence.get('canonical_keys') or first_match.get('canonical_key'))
+        if canonical_keys:
+            summary.append(f'canonical keys: {canonical_keys}')
+
+        matched_keys = _join_values(first_match.get('matched_keys'))
+        if matched_keys:
+            summary.append(f'matched keys: {matched_keys}')
+
+        matched_keywords = _join_values(first_match.get('matched_keywords'))
+        if matched_keywords:
+            summary.append(f'matched keywords: {matched_keywords}')
+
+        snippet = first_match.get('snippet')
+        if snippet:
+            summary.append(f'snippet: {snippet}')
+
+        suggested_actions = {
+            'feedback_mobile_usability_gap': 'review mobile usability feedback and close the mapped artifact gap.',
+            'feedback_trip_output_trust_gap': 'review trip-output trust evidence and decide the smallest confidence-building fix.',
+            'feedback_itinerary_editing_gap': 'review itinerary editing evidence and decide whether version/history UX needs work.',
+            'feedback_family_profile_capture_gap': 'review family-profile evidence and decide what context Embarka should capture earlier.',
+            'feedback_booking_readiness_gap': 'review booking readiness evidence and decide what conversion blocker to remove.',
+            'feedback_family_logistics_gap': 'review family logistics evidence and decide what family constraint support is missing.',
+            'feedback_trip_memory_gap': 'review trip memory evidence and decide what preference persistence is needed.',
+            'feedback_collaboration_gap': 'review collaboration evidence and decide what shared-planning affordance is missing.',
+            'feedback_booking_confidence_gap': 'review booking confidence evidence and decide what proof or handoff would increase trust.',
+            'competitor_collaboration_feature_threat': 'review competitor collaboration evidence and decide whether Embarka needs a response.',
+            'competitor_budget_visibility_threat': 'review competitor budget evidence and decide whether budget visibility belongs on the roadmap.',
+            'competitor_trip_change_management_threat': 'review competitor change-management evidence and decide whether itinerary revision support needs work.',
+        }
+        suggested_action = suggested_actions.get(signal_type)
+        if suggested_action:
+            summary.append(f'suggested action: {suggested_action}')
+
         changed_count = signal_evidence.get('changed_count')
         if changed_count is not None:
             summary.append(f'changed files: {changed_count}')
