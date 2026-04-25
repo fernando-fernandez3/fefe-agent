@@ -152,8 +152,10 @@ As of 2026-04-22:
 
 ## Remaining work
 
-- strengthen structured-signal extraction by reading richer workflow artifacts instead of only review-queue text heuristics
-- add richer Embarka-specific signals beyond the first four, likely around trip-output trust, mobile usability, and booking/conversion friction
+- [done] strengthen structured-signal extraction by reading richer workflow artifacts instead of only review-queue text heuristics
+  - feedback artifacts now read candidate keys from `candidates.json` as well as canonical keys from `discovered.jsonl`
+  - feedback and competitor artifact evidence now carries filtered per-signal matches with source path/type, matched keys/keywords, and snippets
+- [done] add richer Embarka-specific signals beyond the first four, likely around trip-output trust, mobile usability, and booking/conversion friction
 - decide whether structured competitor/feedback signals should stay review-only or sometimes dispatch AutoWorkflow directly
 - decide whether `doc_stale` opportunities should remain review-only or eventually route into a lightweight maintenance executor
 - normalize any future broad-goal onboarding so it does not create a second overlapping Embarka goal again
