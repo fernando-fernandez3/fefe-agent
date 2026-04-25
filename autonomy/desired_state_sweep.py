@@ -427,7 +427,7 @@ class DesiredStateSweep:
             opportunity_id=opportunity.id,
             goal_id=goal.id,
             status="review_required",
-            execution_id=execution.id,
+            execution_id=review.execution_id,
             review_id=review.id,
             blocked_reason=decision.blocked_reason,
         )
