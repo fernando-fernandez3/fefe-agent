@@ -319,32 +319,66 @@ class AutoWorkflowStatusSensor(BaseSensor):
     ) -> list[Signal]:
         texts = self._artifact_texts(paths)
         records = self._load_jsonl_records(paths.get('discovered'))
+        candidates = self._load_json_candidates(paths.get('candidates'))
         if not texts and not records:
             return []
         joined = '\n'.join(texts).lower()
         signals: list[Signal] = []
         canonical_keys = {str(record.get('canonical_key') or '') for record in records if record.get('canonical_key')}
+        candidate_keys = {str(item.get('candidate_key') or '') for item in candidates if item.get('candidate_key')}
+        semantic_keys = canonical_keys | candidate_keys
         implementation_hints = ' '.join(str(record.get('implementation_hint') or '') for record in records).lower()
-        artifact_evidence = self._artifact_evidence(paths, canonical_keys=sorted(k for k in canonical_keys if k))
 
-        if 'trip-itinerary-mobile-floating-menu' in canonical_keys or any(token in joined for token in ['mobile', 'responsive', 'floating menu', 'overlap', 'scroll']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_mobile_usability_gap', signal_strength=0.8, artifact_evidence=artifact_evidence))
-        if any(token in joined for token in ['trust', 'accurate', 'accuracy', 'wrong', 'hallucination', 'reliable', 'confidence']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_trip_output_trust_gap', signal_strength=0.75, artifact_evidence=artifact_evidence))
-        if 'trip-plan-version-history' in canonical_keys or any(token in joined for token in ['edit itinerary', 'change itinerary', 'version history', 'updated plan', 'refine itinerary', 'edit trip']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_itinerary_editing_gap', signal_strength=0.78, artifact_evidence=artifact_evidence))
-        if any(key in canonical_keys for key in ['family-profile-capture', 'family-logistics-profile']) or any(token in joined for token in ['kids ages', 'traveler ages', 'family profile', 'child age', 'ages of kids', 'travel party']) or 'family profile' in implementation_hints:
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_family_profile_capture_gap', signal_strength=0.76, artifact_evidence=artifact_evidence))
-        if 'booking-readiness' in canonical_keys or any(token in joined for token in ['booking', 'book now', 'reservation', 'tickets', 'ready to book', 'booking readiness']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_booking_readiness_gap', signal_strength=0.74, artifact_evidence=artifact_evidence))
-        if any(key in canonical_keys for key in ['family-logistics-gap', 'traveling-with-kids-gap']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_family_logistics_gap', signal_strength=0.8, artifact_evidence=artifact_evidence))
-        if any(key in canonical_keys for key in ['trip-memory-gap', 'remember-family-preferences']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_trip_memory_gap', signal_strength=0.72, artifact_evidence=artifact_evidence))
-        if any(key in canonical_keys for key in ['shared-trip-link', 'collaborative-trip-planning']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_collaboration_gap', signal_strength=0.78, artifact_evidence=artifact_evidence))
-        if any(key in canonical_keys for key in ['booking-confidence-gap', 'trip-output-trust-gap']):
-            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_booking_confidence_gap', signal_strength=0.76, artifact_evidence=artifact_evidence))
+        def evidence_for(keys: list[str], keywords: list[str]) -> dict[str, Any]:
+            return self._artifact_evidence(
+                paths,
+                canonical_keys=sorted(k for k in canonical_keys if k),
+                candidate_keys=sorted(k for k in candidate_keys if k),
+                matches=self._artifact_matches(
+                    paths,
+                    candidates=candidates,
+                    discovered_records=records,
+                    matched_keys=keys,
+                    keywords=keywords,
+                ),
+            )
+
+        mobile_keys = ['trip-itinerary-mobile-floating-menu']
+        mobile_keywords = ['mobile', 'responsive', 'floating menu', 'overlap', 'scroll']
+        if any(key in semantic_keys for key in mobile_keys) or any(token in joined for token in mobile_keywords):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_mobile_usability_gap', signal_strength=0.8, artifact_evidence=evidence_for(mobile_keys, mobile_keywords)))
+        trust_keys: list[str] = []
+        trust_keywords = ['trust', 'accurate', 'accuracy', 'wrong', 'hallucination', 'reliable', 'confidence']
+        if any(token in joined for token in trust_keywords):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_trip_output_trust_gap', signal_strength=0.75, artifact_evidence=evidence_for(trust_keys, trust_keywords)))
+        editing_keys = ['trip-plan-version-history']
+        editing_keywords = ['edit itinerary', 'change itinerary', 'version history', 'updated plan', 'refine itinerary', 'edit trip']
+        if any(key in semantic_keys for key in editing_keys) or any(token in joined for token in editing_keywords):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_itinerary_editing_gap', signal_strength=0.78, artifact_evidence=evidence_for(editing_keys, editing_keywords)))
+        family_profile_keys = ['family-profile-capture', 'family-logistics-profile']
+        family_profile_keywords = ['kids ages', 'traveler ages', 'family profile', 'child age', 'ages of kids', 'travel party']
+        if any(key in semantic_keys for key in family_profile_keys) or any(token in joined for token in family_profile_keywords) or 'family profile' in implementation_hints:
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_family_profile_capture_gap', signal_strength=0.76, artifact_evidence=evidence_for(family_profile_keys, family_profile_keywords)))
+        booking_readiness_keys = ['booking-readiness']
+        booking_readiness_keywords = ['booking', 'book now', 'reservation', 'tickets', 'ready to book', 'booking readiness']
+        if any(key in semantic_keys for key in booking_readiness_keys) or any(token in joined for token in booking_readiness_keywords):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_booking_readiness_gap', signal_strength=0.74, artifact_evidence=evidence_for(booking_readiness_keys, booking_readiness_keywords)))
+        family_logistics_keys = ['family-logistics-gap', 'traveling-with-kids-gap']
+        family_logistics_keywords = ['family logistics', 'traveling with kids', 'kids', 'stroller', 'constraints']
+        if any(key in semantic_keys for key in family_logistics_keys):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_family_logistics_gap', signal_strength=0.8, artifact_evidence=evidence_for(family_logistics_keys, family_logistics_keywords)))
+        trip_memory_keys = ['trip-memory-gap', 'remember-family-preferences']
+        trip_memory_keywords = ['remember', 'memory', 'preferences', 'last trip']
+        if any(key in semantic_keys for key in trip_memory_keys):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_trip_memory_gap', signal_strength=0.72, artifact_evidence=evidence_for(trip_memory_keys, trip_memory_keywords)))
+        collaboration_keys = ['shared-trip-link', 'collaborative-trip-planning']
+        collaboration_keywords = ['shared trip link', 'shared itinerary', 'collaborate', 'collaboration', 'partner']
+        if any(key in semantic_keys for key in collaboration_keys):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_collaboration_gap', signal_strength=0.78, artifact_evidence=evidence_for(collaboration_keys, collaboration_keywords)))
+        booking_confidence_keys = ['booking-confidence-gap', 'trip-output-trust-gap']
+        booking_confidence_keywords = ['booking confidence', 'confidence before', 'confidence', 'book this trip']
+        if any(key in semantic_keys for key in booking_confidence_keys):
+            signals.append(self._emit_artifact_signal(context, sensor_name=self.name, entity_key=entity_key, signal_type='feedback_booking_confidence_gap', signal_strength=0.76, artifact_evidence=evidence_for(booking_confidence_keys, booking_confidence_keywords)))
         return signals
 
     def _competitor_artifact_signals(
@@ -355,8 +389,27 @@ class AutoWorkflowStatusSensor(BaseSensor):
         candidates = self._load_json_candidates(candidates_path) if candidates_path else []
         keys = {str(item.get('candidate_key') or '') for item in candidates}
         joined = '\n'.join(self._artifact_texts(paths)).lower()
-        artifact_evidence = {'artifact_paths': {k: str(v) for k, v in paths.items() if v is not None}}
-        if 'shared-trip-link' in keys or any(token in joined for token in ['shared itinerary', 'group travel', 'real-time editing', 'collaboration']):
+        discovered_records = self._load_jsonl_records(paths.get('discovered'))
+        canonical_keys = {str(record.get('canonical_key') or '') for record in discovered_records if record.get('canonical_key')}
+        semantic_keys = keys | canonical_keys
+
+        def evidence_for(matched_keys: list[str], keywords: list[str]) -> dict[str, Any]:
+            return self._artifact_evidence(
+                paths,
+                candidate_keys=sorted(k for k in keys if k),
+                canonical_keys=sorted(k for k in canonical_keys if k),
+                matches=self._artifact_matches(
+                    paths,
+                    candidates=candidates,
+                    discovered_records=discovered_records,
+                    matched_keys=matched_keys,
+                    keywords=keywords,
+                ),
+            )
+
+        collaboration_keys = ['shared-trip-link']
+        collaboration_keywords = ['shared itinerary', 'group travel', 'real-time editing', 'collaboration']
+        if any(key in semantic_keys for key in collaboration_keys) or any(token in joined for token in collaboration_keywords):
             signals.append(
                 Signal(
                     id=f'{self.name}:competitor_collaboration_feature_threat:{entity_key}',
@@ -366,10 +419,12 @@ class AutoWorkflowStatusSensor(BaseSensor):
                     entity_key=str(entity_key),
                     signal_type='competitor_collaboration_feature_threat',
                     signal_strength=0.85,
-                    evidence=artifact_evidence,
+                    evidence=evidence_for(collaboration_keys, collaboration_keywords),
                 )
             )
-        if 'trip-plan-budget-rollup' in keys or any(token in joined for token in ['budget', 'shared expenses', 'spend', 'cost', 'budget overview']):
+        budget_keys = ['trip-plan-budget-rollup']
+        budget_keywords = ['budget', 'shared expenses', 'spend', 'cost', 'budget overview']
+        if any(key in semantic_keys for key in budget_keys) or any(token in joined for token in budget_keywords):
             signals.append(
                 Signal(
                     id=f'{self.name}:competitor_budget_visibility_threat:{entity_key}',
@@ -379,10 +434,12 @@ class AutoWorkflowStatusSensor(BaseSensor):
                     entity_key=str(entity_key),
                     signal_type='competitor_budget_visibility_threat',
                     signal_strength=0.8,
-                    evidence=artifact_evidence,
+                    evidence=evidence_for(budget_keys, budget_keywords),
                 )
             )
-        if 'trip-plan-version-history' in keys or any(token in joined for token in ['version history', 'change history', 'updated itinerary', 'edit itinerary', 'change management']):
+        change_keys = ['trip-plan-version-history']
+        change_keywords = ['version history', 'change history', 'updated itinerary', 'edit itinerary', 'change management']
+        if any(key in semantic_keys for key in change_keys) or any(token in joined for token in change_keywords):
             signals.append(
                 Signal(
                     id=f'{self.name}:competitor_trip_change_management_threat:{entity_key}',
@@ -392,7 +449,7 @@ class AutoWorkflowStatusSensor(BaseSensor):
                     entity_key=str(entity_key),
                     signal_type='competitor_trip_change_management_threat',
                     signal_strength=0.82,
-                    evidence=artifact_evidence,
+                    evidence=evidence_for(change_keys, change_keywords),
                 )
             )
         return signals
@@ -449,7 +506,9 @@ class AutoWorkflowStatusSensor(BaseSensor):
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return []
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
 
     @staticmethod
     def _load_jsonl_records(path: Path | None) -> list[dict[str, Any]]:
@@ -469,6 +528,104 @@ class AutoWorkflowStatusSensor(BaseSensor):
                     records.append(record)
         except OSError:
             return []
+        return records
+
+    @classmethod
+    def _artifact_matches(
+        cls,
+        paths: dict[str, Path],
+        *,
+        candidates: list[dict[str, Any]],
+        discovered_records: list[dict[str, Any]],
+        matched_keys: list[str],
+        keywords: list[str],
+    ) -> list[dict[str, Any]]:
+        wanted_keys = {key for key in matched_keys if key}
+        records = cls._artifact_source_records(paths, candidates, discovered_records)
+        matches: list[dict[str, Any]] = []
+        for record in records:
+            text = str(record.get('text') or '')
+            lower = text.lower()
+            record_keys = [
+                key
+                for key in [record.get('candidate_key'), record.get('canonical_key')]
+                if key and key in wanted_keys
+            ]
+            keyword_hits = [keyword for keyword in keywords if keyword in lower]
+            if not record_keys and not keyword_hits:
+                continue
+
+            match: dict[str, Any] = {
+                'source_path': record['source_path'],
+                'source_type': record['source_type'],
+                'title': record.get('title'),
+                'snippet': cls._snippet_from_text(text, keyword_hits or record_keys),
+            }
+            if record.get('candidate_key'):
+                match['candidate_key'] = record['candidate_key']
+            if record.get('canonical_key'):
+                match['canonical_key'] = record['canonical_key']
+            if record_keys:
+                match['matched_keys'] = record_keys
+            if keyword_hits:
+                match['matched_keywords'] = keyword_hits
+            matches.append({k: v for k, v in match.items() if v not in (None, '', [])})
+        return matches[:10]
+
+    @classmethod
+    def _artifact_source_records(
+        cls,
+        paths: dict[str, Path],
+        candidates: list[dict[str, Any]],
+        discovered_records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        candidates_path = paths.get('candidates')
+        if candidates_path is not None:
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                records.append(
+                    {
+                        'source_path': str(candidates_path),
+                        'source_type': 'candidates',
+                        'title': item.get('title') or item.get('name'),
+                        'candidate_key': item.get('candidate_key'),
+                        'canonical_key': item.get('canonical_key'),
+                        'text': cls._record_text(item),
+                    }
+                )
+
+        discovered_path = paths.get('discovered')
+        if discovered_path is not None:
+            for item in discovered_records:
+                records.append(
+                    {
+                        'source_path': str(discovered_path),
+                        'source_type': 'discovered',
+                        'title': item.get('title') or item.get('name'),
+                        'candidate_key': item.get('candidate_key'),
+                        'canonical_key': item.get('canonical_key'),
+                        'text': cls._record_text(item),
+                    }
+                )
+
+        for source_type in ['proposal', 'audit_summary', 'review_packet']:
+            path = paths.get(source_type)
+            if path is None or not path.exists() or not path.is_file():
+                continue
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            records.append(
+                {
+                    'source_path': str(path),
+                    'source_type': source_type,
+                    'title': path.name,
+                    'text': text,
+                }
+            )
         return records
 
     @staticmethod
@@ -551,6 +708,10 @@ class AutoWorkflowStatusSensor(BaseSensor):
     @classmethod
     def _record_snippet(cls, item: dict[str, Any], keywords: list[str]) -> str:
         text = cls._record_text(item)
+        return cls._snippet_from_text(text, keywords)
+
+    @staticmethod
+    def _snippet_from_text(text: str, keywords: list[str]) -> str:
         lower = text.lower()
         for keyword in keywords:
             idx = lower.find(keyword)
