@@ -6,6 +6,19 @@ from autonomy.models import DelegationMode, Opportunity, Signal
 from autonomy.store import AutonomyStore
 
 
+def failing_tests_opportunity_title(*, evidence: dict | None, entity_key: str | None) -> str:
+    evidence = evidence or {}
+    asset_label = evidence.get('asset_label')
+    if asset_label is not None and str(asset_label).strip():
+        repo_label = str(asset_label)
+    else:
+        stripped_entity_key = str(entity_key or '').rstrip('/')
+        repo_label = stripped_entity_key.rsplit('/', 1)[-1] if stripped_entity_key else ''
+        if not repo_label:
+            repo_label = 'unknown'
+    return f'Investigate failing tests: {repo_label}'
+
+
 class OpportunityEngine:
     IGNORE_SIGNAL_TYPES = {
         'doc_recently_modified',
@@ -24,7 +37,7 @@ class OpportunityEngine:
             urgency = 0.85
             expected_value = 0.9
             context_cost = 0.2
-            title = 'Investigate failing test slice'
+            title = failing_tests_opportunity_title(evidence=signal.evidence, entity_key=signal.entity_key)
             risk_level = 'low'
         elif signal.signal_type == 'workflows_failed':
             confidence = 0.9
