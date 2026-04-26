@@ -159,6 +159,7 @@ def test_bot_bypass_does_not_leak_to_other_platforms(monkeypatch):
     runner = _make_bare_runner()
 
     monkeypatch.setenv("DISCORD_ALLOW_BOTS", "all")
+    monkeypatch.delenv("TELEGRAM_ALLOW_BOTS", raising=False)
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "100200300")
 
     telegram_bot = SessionSource(
@@ -168,6 +169,44 @@ def test_bot_bypass_does_not_leak_to_other_platforms(monkeypatch):
         user_id="999888777",
         is_bot=True,
     )
+    assert runner._is_user_authorized(telegram_bot) is False
+
+
+def test_telegram_bot_authorized_when_allow_bots_mentions(monkeypatch):
+    """TELEGRAM_ALLOW_BOTS=mentions authorizes bot senders that already
+    passed Telegram mention gating, without adding bot IDs to human allowlists.
+    """
+    runner = _make_bare_runner()
+
+    monkeypatch.setenv("TELEGRAM_ALLOW_BOTS", "mentions")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "100200300")
+
+    telegram_bot = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-5169337862",
+        chat_type="group",
+        user_id="999888777",
+        user_name="Claudia",
+        is_bot=True,
+    )
+
+    assert runner._is_user_authorized(telegram_bot) is True
+
+
+def test_telegram_bot_not_authorized_when_allow_bots_unset(monkeypatch):
+    runner = _make_bare_runner()
+
+    monkeypatch.delenv("TELEGRAM_ALLOW_BOTS", raising=False)
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "100200300")
+
+    telegram_bot = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-5169337862",
+        chat_type="group",
+        user_id="999888777",
+        is_bot=True,
+    )
+
     assert runner._is_user_authorized(telegram_bot) is False
 
 

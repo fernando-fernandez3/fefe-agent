@@ -178,6 +178,7 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
     (hermes_home / "config.yaml").write_text(
         "telegram:\n"
         "  require_mention: true\n"
+        "  allow_bots: mentions\n"
         "  require_mention_chats:\n"
         "    - \"-555\"\n"
         "    - \"-555:31\"\n"
@@ -190,6 +191,7 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("TELEGRAM_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("TELEGRAM_ALLOW_BOTS", raising=False)
     monkeypatch.delenv("TELEGRAM_REQUIRE_MENTION_CHATS", raising=False)
     monkeypatch.delenv("TELEGRAM_MENTION_PATTERNS", raising=False)
     monkeypatch.delenv("TELEGRAM_FREE_RESPONSE_CHATS", raising=False)
@@ -199,6 +201,7 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
     assert config is not None
     assert config.platforms[Platform.TELEGRAM].extra["require_mention_chats"] == ["-555", "-555:31"]
     assert __import__("os").environ["TELEGRAM_REQUIRE_MENTION"] == "true"
+    assert __import__("os").environ["TELEGRAM_ALLOW_BOTS"] == "mentions"
     assert __import__("os").environ["TELEGRAM_REQUIRE_MENTION_CHATS"] == "-555,-555:31"
     assert json.loads(__import__("os").environ["TELEGRAM_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
     assert __import__("os").environ["TELEGRAM_FREE_RESPONSE_CHATS"] == "-123"

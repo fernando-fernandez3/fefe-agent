@@ -3247,6 +3247,13 @@ class GatewayRunner:
         if platform_allow_all_var and os.getenv(platform_allow_all_var, "").lower() in ("true", "1", "yes"):
             return True
 
+        # Bot senders that passed the platform-level bot policy are already
+        # authorized at the platform level — skip the human user allowlist.
+        if source.platform == Platform.TELEGRAM and getattr(source, "is_bot", False):
+            allow_bots = os.getenv("TELEGRAM_ALLOW_BOTS", "none").lower().strip()
+            if allow_bots in ("mentions", "all"):
+                return True
+
         # Discord bot senders that passed the DISCORD_ALLOW_BOTS platform
         # filter are already authorized at the platform level — skip the
         # user allowlist. Without this, bot messages allowed by

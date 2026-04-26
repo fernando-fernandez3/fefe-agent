@@ -553,6 +553,201 @@ class TestToolResultPreflightCompression:
         mock_compress.assert_called_once()
         assert result["completed"] is True
 
+    def test_billing_fallback_happy_path_returns_response(self):
+        """Primary billing 400 should switch to fallback and return non-empty output."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4-5",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                fallback_model={"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+            )
+
+        primary_client = MagicMock()
+        billing_400 = Exception(
+            "Error code: 400 - You're out of extra usage. "
+            "Add more at claude.ai/settings/usage and keep going."
+        )
+        billing_400.status_code = 400
+        primary_client.chat.completions.create.side_effect = [billing_400]
+        agent.client = primary_client
+
+        fallback_client = MagicMock()
+        fallback_client.api_key = "codex-oauth-token"
+        fallback_client.base_url = "https://openrouter.ai/api/v1"
+        fallback_client.chat.completions.create.return_value = _mock_response(
+            content="Fallback completed", finish_reason="stop"
+        )
+
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.save_trajectories = False
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(fallback_client, "google/gemini-2.5-flash"),
+            ),
+            patch("agent.model_metadata.get_model_context_length", return_value=64_000),
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+        ):
+            result = agent.run_conversation("run cron sweep")
+
+        mock_compress.assert_not_called()
+        assert primary_client.chat.completions.create.call_count == 1
+        assert fallback_client.chat.completions.create.call_count == 1
+        assert result["completed"] is True
+        assert result["final_response"] == "Fallback completed"
+
+    def test_billing_fallback_preflights_against_smaller_context(self):
+        """Primary billing failure should compress before the first smaller fallback request."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4-5",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                fallback_model={"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+            )
+
+        primary_client = MagicMock()
+        billing_400 = Exception(
+            "Error code: 400 - You're out of extra usage. "
+            "Add more at claude.ai/settings/usage and keep going."
+        )
+        billing_400.status_code = 400
+        primary_client.chat.completions.create.side_effect = [billing_400]
+        agent.client = primary_client
+
+        fallback_client = MagicMock()
+        fallback_client.api_key = "codex-oauth-token"
+        fallback_client.base_url = "https://openrouter.ai/api/v1"
+        fallback_client.chat.completions.create.return_value = _mock_response(
+            content="Recovered on fallback", finish_reason="stop"
+        )
+
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 1_000_000
+        agent.context_compressor.threshold_tokens = 850_000
+        agent.save_trajectories = False
+
+        big_history = []
+        for i in range(180):
+            big_history.append({"role": "user", "content": f"u{i} " + "x" * 1000})
+            big_history.append({"role": "assistant", "content": f"a{i} " + "y" * 1000})
+
+        compressed_messages = [
+            {"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious cron sweep"},
+            {"role": "user", "content": "run cron sweep"},
+        ]
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(fallback_client, "google/gemini-2.5-flash"),
+            ),
+            patch("agent.model_metadata.get_model_context_length", return_value=2_000),
+            patch.object(agent, "_compress_context", return_value=(compressed_messages, "compressed prompt")) as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+        ):
+            result = agent.run_conversation("run cron sweep", conversation_history=big_history)
+
+        mock_compress.assert_called_once()
+        assert primary_client.chat.completions.create.call_count == 1
+        assert fallback_client.chat.completions.create.call_count == 1
+        fallback_messages = fallback_client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(SUMMARY_PREFIX in (m.get("content") or "") for m in fallback_messages)
+        assert len(fallback_messages) < len(big_history)
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered on fallback"
+
+    def test_billing_fallback_context_failure_returns_structured_error(self):
+        """If fallback compression cannot fit, return a failed result for cron delivery."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4-5",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                fallback_model={"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+            )
+
+        primary_client = MagicMock()
+        billing_400 = Exception(
+            "Error code: 400 - You're out of extra usage. "
+            "Add more at claude.ai/settings/usage and keep going."
+        )
+        billing_400.status_code = 400
+        primary_client.chat.completions.create.side_effect = [billing_400]
+        agent.client = primary_client
+
+        context_400 = Exception("Your input exceeds the context window of this model.")
+        context_400.status_code = 400
+        fallback_client = MagicMock()
+        fallback_client.api_key = "codex-oauth-token"
+        fallback_client.base_url = "https://openrouter.ai/api/v1"
+        fallback_client.chat.completions.create.side_effect = context_400
+
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = True
+        agent.save_trajectories = False
+
+        big_history = []
+        for i in range(80):
+            big_history.append({"role": "user", "content": f"u{i} " + "x" * 2000})
+            big_history.append({"role": "assistant", "content": f"a{i} " + "y" * 2000})
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(fallback_client, "google/gemini-2.5-flash"),
+            ),
+            patch("agent.model_metadata.get_model_context_length", return_value=64_000),
+            patch.object(agent, "_compress_context", return_value=(big_history, "still too large")) as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+        ):
+            result = agent.run_conversation("run cron sweep", conversation_history=big_history)
+
+        assert mock_compress.call_count >= 2
+        assert primary_client.chat.completions.create.call_count == 1
+        assert fallback_client.chat.completions.create.call_count >= 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["compression_exhausted"] is True
+        assert "Context length exceeded" in result["error"]
+
     def test_anthropic_prompt_too_long_safety_net(self, agent):
         """Anthropic 'prompt is too long' error triggers compression as safety net."""
         err_400 = Exception(

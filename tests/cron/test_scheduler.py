@@ -881,6 +881,36 @@ class TestRunJobSessionPersistence:
         # But the output log should show the placeholder
         assert "(No response generated)" in output
 
+    def test_billing_fallback_structured_agent_failure_returns_failed_cron_result(self, tmp_path):
+        """Structured agent failures must become failed cron results, not empty success."""
+        job = {
+            "id": "billing-fallback-job",
+            "name": "billing fallback",
+            "prompt": "run work",
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {
+                "completed": False,
+                "failed": True,
+                "compression_exhausted": True,
+                "error": "Context length exceeded (72,000 tokens). Cannot compress further.",
+                "messages": [],
+            }
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert error == "Agent failure: Context length exceeded (72,000 tokens). Cannot compress further."
+        assert "# Cron Job: billing fallback (FAILED)" in output
+        assert "## Error" in output
+        assert error in output
+
     def test_tick_marks_empty_response_as_error(self, tmp_path):
         """When run_job returns success=True but final_response is empty,
         tick() should mark the job as error so last_status != 'ok'.
@@ -1299,6 +1329,29 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+
+    def test_billing_fallback_failed_job_delivery_includes_timestamped_error(self):
+        """Fallback failures should produce a human-readable cron alert."""
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch(
+                 "cron.scheduler.run_job",
+                 return_value=(
+                     False,
+                     "# output",
+                     "",
+                     "Agent failure: Context length exceeded. Cannot compress further.",
+                 ),
+             ), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_called_once()
+        delivered = deliver_mock.call_args.args[1]
+        assert "Cron job 'monitor' failed at " in delivered
+        assert "Agent failure: Context length exceeded. Cannot compress further." in delivered
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \

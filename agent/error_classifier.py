@@ -97,6 +97,8 @@ _BILLING_PATTERNS = [
     "payment required",
     "billing hard limit",
     "exceeded your current quota",
+    "out of extra usage",
+    "add more at claude.ai/settings/usage",
     "account is deactivated",
     "plan does not include",
 ]

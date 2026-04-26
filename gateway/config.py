@@ -693,6 +693,8 @@ def load_gateway_config() -> GatewayConfig:
             if isinstance(telegram_cfg, dict):
                 if "require_mention" in telegram_cfg and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
                     os.environ["TELEGRAM_REQUIRE_MENTION"] = str(telegram_cfg["require_mention"]).lower()
+                if "allow_bots" in telegram_cfg and not os.getenv("TELEGRAM_ALLOW_BOTS"):
+                    os.environ["TELEGRAM_ALLOW_BOTS"] = str(telegram_cfg["allow_bots"]).lower()
                 require_mention_chats = telegram_cfg.get("require_mention_chats")
                 if require_mention_chats is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION_CHATS"):
                     if isinstance(require_mention_chats, list):

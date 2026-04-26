@@ -7226,6 +7226,89 @@ class AIAgent:
             logging.warning("Failed to restore primary runtime: %s", e)
             return False
 
+    def _preflight_compress_if_needed(
+        self,
+        messages,
+        active_system_prompt,
+        system_message=None,
+        *,
+        task_id=None,
+        reason="preflight",
+    ):
+        """Compress oversized message buffers before an LLM request.
+
+        This is used both at turn start and immediately after fallback
+        activation. Fallback can shrink the active model context window without
+        any prior size-pressure error, so the current buffer must be rechecked
+        against the fallback compressor limits before the next request.
+        """
+        if not (
+            self.compression_enabled
+            and self.context_compressor
+            and len(messages) > self.context_compressor.protect_first_n
+                                + self.context_compressor.protect_last_n + 1
+        ):
+            return messages, active_system_prompt, False
+
+        # Include tool schema tokens — with many tools these can add 20-30K+
+        # tokens that a sys+msg estimate misses entirely.
+        preflight_tokens = estimate_request_tokens_rough(
+            messages,
+            system_prompt=active_system_prompt or "",
+            tools=self.tools or None,
+        )
+
+        if preflight_tokens < self.context_compressor.threshold_tokens:
+            return messages, active_system_prompt, False
+
+        logger.info(
+            "%s compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+            reason.capitalize(),
+            f"{preflight_tokens:,}",
+            f"{self.context_compressor.threshold_tokens:,}",
+            self.model,
+            f"{self.context_compressor.context_length:,}",
+        )
+        if not self.quiet_mode:
+            label = "Preflight" if reason == "preflight" else reason.replace("_", " ").capitalize()
+            self._safe_print(
+                f"📦 {label} compression: ~{preflight_tokens:,} tokens "
+                f">= {self.context_compressor.threshold_tokens:,} threshold"
+            )
+
+        compressed = False
+        # May need multiple passes for very large sessions with small context
+        # windows (each pass summarises the middle N turns).
+        for _pass in range(3):
+            orig_len = len(messages)
+            messages, active_system_prompt = self._compress_context(
+                messages,
+                system_message,
+                approx_tokens=preflight_tokens,
+                task_id=task_id,
+            )
+            if len(messages) >= orig_len:
+                break  # Cannot compress further
+            compressed = True
+
+            # Fix: reset retry counters after compression so the model gets a
+            # fresh budget on the compressed context.
+            self._empty_content_retries = 0
+            self._thinking_prefill_retries = 0
+            self._last_content_with_tools = None
+            self._last_content_tools_all_housekeeping = False
+            self._mute_post_response = False
+
+            preflight_tokens = estimate_request_tokens_rough(
+                messages,
+                system_prompt=active_system_prompt or "",
+                tools=self.tools or None,
+            )
+            if preflight_tokens < self.context_compressor.threshold_tokens:
+                break
+
+        return messages, active_system_prompt, compressed
+
     # Which error types indicate a transient transport failure worth
     # one more attempt with a rebuilt client / connection pool.
     _TRANSIENT_TRANSPORT_ERRORS = frozenset({
@@ -9764,66 +9847,19 @@ class AIAgent:
         # while having a large existing session — compress proactively rather
         # than waiting for an API error (which might be caught as a non-retryable
         # 4xx and abort the request entirely).
-        if (
-            self.compression_enabled
-            and len(messages) > self.context_compressor.protect_first_n
-                                + self.context_compressor.protect_last_n + 1
-        ):
-            # Include tool schema tokens — with many tools these can add
-            # 20-30K+ tokens that the old sys+msg estimate missed entirely.
-            _preflight_tokens = estimate_request_tokens_rough(
-                messages,
-                system_prompt=active_system_prompt or "",
-                tools=self.tools or None,
-            )
-
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
-                logger.info(
-                    "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-                    f"{_preflight_tokens:,}",
-                    f"{self.context_compressor.threshold_tokens:,}",
-                    self.model,
-                    f"{self.context_compressor.context_length:,}",
-                )
-                if not self.quiet_mode:
-                    self._safe_print(
-                        f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                        f">= {self.context_compressor.threshold_tokens:,} threshold"
-                    )
-                # May need multiple passes for very large sessions with small
-                # context windows (each pass summarises the middle N turns).
-                for _pass in range(3):
-                    _orig_len = len(messages)
-                    messages, active_system_prompt = self._compress_context(
-                        messages, system_message, approx_tokens=_preflight_tokens,
-                        task_id=effective_task_id,
-                    )
-                    if len(messages) >= _orig_len:
-                        break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
-                    conversation_history = None
-                    # Fix: reset retry counters after compression so the model
-                    # gets a fresh budget on the compressed context.  Without
-                    # this, pre-compression retries carry over and the model
-                    # hits "(empty)" immediately after compression-induced
-                    # context loss.
-                    self._empty_content_retries = 0
-                    self._thinking_prefill_retries = 0
-                    self._last_content_with_tools = None
-                    self._last_content_tools_all_housekeeping = False
-                    self._mute_post_response = False
-                    # Re-estimate after compression
-                    _preflight_tokens = estimate_request_tokens_rough(
-                        messages,
-                        system_prompt=active_system_prompt or "",
-                        tools=self.tools or None,
-                    )
-                    if _preflight_tokens < self.context_compressor.threshold_tokens:
-                        break  # Under threshold
+        messages, active_system_prompt, _preflight_compressed = self._preflight_compress_if_needed(
+            messages,
+            active_system_prompt,
+            system_message,
+            task_id=effective_task_id,
+            reason="preflight",
+        )
+        if _preflight_compressed:
+            # Compression created a new session — clear the history reference so
+            # _flush_messages_to_session_db writes ALL compressed messages to the
+            # new session's SQLite, not skipping them because
+            # conversation_history is still the pre-compression length.
+            conversation_history = None
 
         # Plugin hook: pre_llm_call
         # Fired once per turn before the tool-calling loop.  Plugins can
@@ -10216,6 +10252,22 @@ class AIAgent:
             response = None  # Guard against UnboundLocalError if all retries fail
             api_kwargs = None  # Guard against UnboundLocalError in except handler
 
+            def _restart_after_fallback_preflight() -> bool:
+                """Return True when fallback activation compressed and API messages must rebuild."""
+                nonlocal messages, active_system_prompt, conversation_history, restart_with_compressed_messages
+                messages, active_system_prompt, fallback_compressed = self._preflight_compress_if_needed(
+                    messages,
+                    active_system_prompt,
+                    system_message,
+                    task_id=effective_task_id,
+                    reason="fallback_preflight",
+                )
+                if fallback_compressed:
+                    conversation_history = None
+                    restart_with_compressed_messages = True
+                    return True
+                return False
+
             while retry_count < max_retries:
                 # ── Nous Portal rate limit guard ──────────────────────
                 # If another session already recorded that Nous is rate-
@@ -10243,6 +10295,8 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if _restart_after_fallback_preflight():
+                                    break
                                 continue
                             # No fallback available — return with clear message
                             self._persist_session(messages, conversation_history)
@@ -10455,6 +10509,8 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            if _restart_after_fallback_preflight():
+                                break
                             continue
 
                         # Check for error field in response (some providers include this)
@@ -10525,6 +10581,8 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if _restart_after_fallback_preflight():
+                                    break
                                 continue
                             self._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
                             logging.error(f"{self.log_prefix}Invalid API response after {max_retries} retries.")
@@ -11414,6 +11472,8 @@ class AIAgent:
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
+                                if _restart_after_fallback_preflight():
+                                    break
                                 continue
 
                     # ── Nous Portal: record rate limit & skip retries ─────
@@ -11742,6 +11802,8 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            if _restart_after_fallback_preflight():
+                                break
                             continue
                         if api_kwargs is not None:
                             self._dump_api_request_debug(
@@ -11809,6 +11871,8 @@ class AIAgent:
                             retry_count = 0
                             compression_attempts = 0
                             primary_recovery_attempted = False
+                            if _restart_after_fallback_preflight():
+                                break
                             continue
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:

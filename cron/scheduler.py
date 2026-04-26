@@ -1108,6 +1108,36 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Strip leaked placeholder text that upstream may inject on empty completions.
         if final_response.strip() == "(No response generated)":
             final_response = ""
+
+        if result.get("failed") or result.get("error"):
+            result_error = str(
+                result.get("error")
+                or final_response
+                or "Agent returned a structured failure without an error message"
+            )
+            error_msg = f"Agent failure: {result_error}"
+            logger.error("Job '%s' failed: %s", job_name, error_msg)
+            logged_response = final_response if final_response else "(No response generated)"
+            output = f"""# Cron Job: {job_name} (FAILED)
+
+**Job ID:** {job_id}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+
+## Prompt
+
+{prompt}
+
+## Response
+
+{logged_response}
+
+## Error
+
+{error_msg}
+"""
+            return False, output, "", error_msg
+
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
@@ -1277,7 +1307,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
                 # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                deliver_content = final_response if success else (
+                    f"⚠️ Cron job '{job.get('name', job['id'])}' failed at "
+                    f"{_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}:\n{error}"
+                )
                 should_deliver = bool(deliver_content)
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
