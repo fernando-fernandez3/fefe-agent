@@ -58,7 +58,76 @@ def test_list_opportunities_orders_by_score_desc(tmp_path):
     engine.upsert_from_signal(store, failing_tests)
 
     opportunities = store.list_opportunities(domain='code_projects')
-    assert opportunities[0].title == 'Investigate failing test slice'
+    assert opportunities[0].title == 'Investigate failing tests: repo'
+    store.close()
+
+
+def test_failing_tests_title_uses_asset_label_verbatim(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    engine = OpportunityEngine()
+
+    opportunity = engine.upsert_from_signal(
+        store,
+        Signal(
+            id='sig_fail',
+            domain='code_projects',
+            source_sensor='repo_health',
+            entity_type='repo',
+            entity_key='/home/fefernandez/autoworkflow',
+            signal_type='failing_tests',
+            signal_strength=0.95,
+            evidence={'asset_label': 'AutoWorkflow'},
+            created_at='2026-04-12T12:00:00+00:00',
+        ),
+    )
+
+    assert opportunity.title == 'Investigate failing tests: AutoWorkflow'
+    store.close()
+
+
+def test_failing_tests_title_falls_back_to_entity_key_basename(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    engine = OpportunityEngine()
+
+    opportunity = engine.upsert_from_signal(
+        store,
+        Signal(
+            id='sig_fail',
+            domain='code_projects',
+            source_sensor='repo_health',
+            entity_type='repo',
+            entity_key='/home/fefernandez/dev/github/call-screener',
+            signal_type='failing_tests',
+            signal_strength=0.95,
+            evidence={},
+            created_at='2026-04-12T12:00:00+00:00',
+        ),
+    )
+
+    assert opportunity.title == 'Investigate failing tests: call-screener'
+    store.close()
+
+
+def test_failing_tests_title_falls_back_to_unknown(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    engine = OpportunityEngine()
+
+    opportunity = engine.upsert_from_signal(
+        store,
+        Signal(
+            id='sig_fail',
+            domain='code_projects',
+            source_sensor='repo_health',
+            entity_type='repo',
+            entity_key='',
+            signal_type='failing_tests',
+            signal_strength=0.95,
+            evidence={'asset_label': ''},
+            created_at='2026-04-12T12:00:00+00:00',
+        ),
+    )
+
+    assert opportunity.title == 'Investigate failing tests: unknown'
     store.close()
 
 
