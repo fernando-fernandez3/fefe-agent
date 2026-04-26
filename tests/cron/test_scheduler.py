@@ -1091,33 +1091,15 @@ class TestRunJobSessionPersistence:
     def test_run_job_treats_agent_failure_flag_as_failure(
         self, tmp_path, agent_result, expected_err_substring
     ):
-        """Issue #17855: run_conversation returns ``failed=True``/``completed=False``
-        when the agent's API call exhausts retries or aborts mid-run. run_job
-        must surface this as success=False so cron's last_status reflects the
-        failure and the user gets an error notification, instead of treating
-        the (often non-empty) error string in final_response as a legitimate
-        agent reply.
-        """
+        """Structured agent failures must become failed cron results."""
         job = {
             "id": "failing-api-job",
             "name": "failing api",
             "prompt": "do something",
         }
-        fake_db = MagicMock()
+        fake_db, patches = self._make_run_job_patches(tmp_path)
 
-        with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
-             patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
-             patch(
-                 "hermes_cli.runtime_provider.resolve_runtime_provider",
-                 return_value={
-                     "api_key": "***",
-                     "base_url": "https://example.invalid/v1",
-                     "provider": "openrouter",
-                     "api_mode": "chat_completions",
-                 },
-             ), \
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch("run_agent.AIAgent") as mock_agent_cls:
             mock_agent = MagicMock()
             mock_agent.run_conversation.return_value = agent_result
@@ -1128,35 +1110,49 @@ class TestRunJobSessionPersistence:
         assert success is False
         assert final_response == ""
         assert error is not None and expected_err_substring in error
-        # Output should be the FAILED template, not the success template.
         assert "(FAILED)" in output
-        # Ephemeral cron agent must still be closed even on agent-flagged failure.
         mock_agent.close.assert_called_once()
 
+    def test_billing_fallback_structured_agent_failure_returns_failed_cron_result(self, tmp_path):
+        """Compression-exhausted structured failures must become failed cron results."""
+        job = {
+            "id": "billing-fallback-job",
+            "name": "billing fallback",
+            "prompt": "run work",
+        }
+        fake_db, patches = self._make_run_job_patches(tmp_path)
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {
+                "completed": False,
+                "failed": True,
+                "compression_exhausted": True,
+                "error": "Context length exceeded (72,000 tokens). Cannot compress further.",
+                "messages": [],
+            }
+            mock_agent_cls.return_value = mock_agent
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert error == "Agent failure: Context length exceeded (72,000 tokens). Cannot compress further."
+        assert "# Cron Job: billing fallback (FAILED)" in output
+        assert "## Error" in output
+        assert error in output
+
     def test_run_job_completed_true_without_failed_flag_succeeds(self, tmp_path):
-        """Regression guard: a normal success result (``completed=True``,
-        ``failed`` absent) must not trip the failure-flag check.
-        """
+        """A normal success result must not trip the failure-flag check."""
         job = {
             "id": "ok-job",
             "name": "ok",
             "prompt": "hello",
         }
-        fake_db = MagicMock()
+        fake_db, patches = self._make_run_job_patches(tmp_path)
 
-        with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
-             patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
-             patch(
-                 "hermes_cli.runtime_provider.resolve_runtime_provider",
-                 return_value={
-                     "api_key": "***",
-                     "base_url": "https://example.invalid/v1",
-                     "provider": "openrouter",
-                     "api_mode": "chat_completions",
-                 },
-             ), \
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
              patch("run_agent.AIAgent") as mock_agent_cls:
             mock_agent = MagicMock()
             mock_agent.run_conversation.return_value = {
@@ -1760,6 +1756,29 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+
+    def test_billing_fallback_failed_job_delivery_includes_timestamped_error(self):
+        """Fallback failures should produce a human-readable cron alert."""
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch(
+                 "cron.scheduler.run_job",
+                 return_value=(
+                     False,
+                     "# output",
+                     "",
+                     "Agent failure: Context length exceeded. Cannot compress further.",
+                 ),
+             ), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_called_once()
+        delivered = deliver_mock.call_args.args[1]
+        assert "Cron job 'monitor' failed at " in delivered
+        assert "Agent failure: Context length exceeded. Cannot compress further." in delivered
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
