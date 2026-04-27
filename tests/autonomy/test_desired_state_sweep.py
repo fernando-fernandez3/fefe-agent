@@ -334,3 +334,145 @@ def test_desired_state_sweep_persists_matrix_entry_context_into_opportunity_evid
     assert opportunity.evidence['asset_label'] == 'Feedback loop'
     assert opportunity.evidence['subdomain'] == 'discovery_cadence'
     store.close()
+
+def test_desired_state_sweep_filters_active_goals_by_allowed_domains(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=[],
+    )
+    store.create_goal(goal_id='allowed_goal', title='Allowed', domain='code_projects', priority=10)
+    store.add_goal_matrix_entry(
+        entry_id='entry_allowed',
+        goal_id='allowed_goal',
+        asset_type='repo',
+        label='Allowed repo',
+        locator='/repo/allowed',
+    )
+    store.create_goal(goal_id='blocked_goal', title='Blocked', domain='personal', priority=100)
+    store.add_goal_matrix_entry(
+        entry_id='entry_blocked',
+        goal_id='blocked_goal',
+        asset_type='repo',
+        label='Blocked repo',
+        locator='/repo/blocked',
+    )
+
+    sensor = LocatorSignalSensor(
+        {
+            '/repo/allowed': Signal(
+                id='sig_allowed',
+                domain='code_projects',
+                source_sensor='locator_signal_sensor',
+                entity_type='repo',
+                entity_key='/repo/allowed',
+                signal_type='generic_allowed_signal',
+                signal_strength=0.9,
+                evidence={'repo_path': '/repo/allowed'},
+            ),
+            '/repo/blocked': Signal(
+                id='sig_blocked',
+                domain='personal',
+                source_sensor='locator_signal_sensor',
+                entity_type='repo',
+                entity_key='/repo/blocked',
+                signal_type='generic_blocked_signal',
+                signal_strength=1.0,
+                evidence={'repo_path': '/repo/blocked'},
+            ),
+        }
+    )
+    executor = RecordingExecutor()
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=SensorRegistry({'repo': sensor}),
+        executors={'repo_executor': executor},
+        allowed_domains={'code_projects'},
+    )
+
+    result = sweep.run()
+
+    assert result.goals_checked == 1
+    assert result.actions_taken == 1
+    assert len(executor.tasks) == 1
+    assert executor.tasks[0].repo_path.as_posix() == '/repo/allowed'
+    assert store.get_opportunity('opp::code_projects::generic_allowed_signal::/repo/allowed')
+    assert store.list_opportunities(domain='personal') == []
+    store.close()
+
+def test_desired_state_sweep_ignores_disallowed_domain_signals_from_allowed_goal(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=[],
+    )
+    store.create_policy(
+        policy_id='policy_personal',
+        domain='personal',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=[],
+    )
+    store.create_goal(goal_id='allowed_goal', title='Allowed', domain='code_projects', priority=10)
+    store.add_goal_matrix_entry(
+        entry_id='entry_allowed',
+        goal_id='allowed_goal',
+        asset_type='repo',
+        label='Allowed repo',
+        locator='/repo/allowed',
+    )
+
+    class CrossDomainSensor(BaseSensor):
+        @property
+        def name(self) -> str:
+            return 'cross_domain_sensor'
+
+        def collect(self, context: SensorContext) -> SensorResult:
+            return SensorResult(
+                sensor_name=self.name,
+                signals=[
+                    Signal(
+                        id='sig_allowed',
+                        domain='code_projects',
+                        source_sensor=self.name,
+                        entity_type='repo',
+                        entity_key='/repo/allowed',
+                        signal_type='generic_allowed_signal',
+                        signal_strength=0.9,
+                        evidence={'repo_path': '/repo/allowed'},
+                    ),
+                    Signal(
+                        id='sig_blocked',
+                        domain='personal',
+                        source_sensor=self.name,
+                        entity_type='repo',
+                        entity_key='/repo/blocked',
+                        signal_type='generic_blocked_signal',
+                        signal_strength=1.0,
+                        evidence={'repo_path': '/repo/blocked'},
+                    ),
+                ],
+            )
+
+    executor = RecordingExecutor()
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=SensorRegistry({'repo': CrossDomainSensor()}),
+        executors={'repo_executor': executor},
+        allowed_domains={'code_projects'},
+    )
+
+    result = sweep.run()
+
+    assert result.actions_taken == 1
+    assert len(executor.tasks) == 1
+    assert executor.tasks[0].repo_path.as_posix() == '/repo/allowed'
+    assert store.list_opportunities(domain='personal') == []
+    assert not store.db.fetchall('SELECT * FROM signals WHERE domain = ?', ('personal',))
+    store.close()
