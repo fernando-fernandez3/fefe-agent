@@ -2207,45 +2207,32 @@ class TestUtilityToolRegistration:
 import math
 import time
 
-class _CompatType:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
 try:
     from mcp.types import (
         CreateMessageResult,
+        CreateMessageResultWithTools,
         ErrorData,
         SamplingCapability,
+        SamplingToolsCapability,
         TextContent,
+        ToolUseContent,
     )
+    _MCP_SAMPLING_TYPES_AVAILABLE = True
 except ImportError:
-    CreateMessageResult = _CompatType
-    ErrorData = _CompatType
-    SamplingCapability = _CompatType
-    TextContent = _CompatType
+    CreateMessageResult = None
+    CreateMessageResultWithTools = None
+    ErrorData = None
+    SamplingCapability = None
+    SamplingToolsCapability = None
+    TextContent = None
+    ToolUseContent = None
+    _MCP_SAMPLING_TYPES_AVAILABLE = False
 
-try:
-    from mcp.types import CreateMessageResultWithTools
-except ImportError:
-    CreateMessageResultWithTools = _CompatType
+from tools.mcp_tool import SamplingHandler, _safe_numeric
 
-try:
-    from mcp.types import SamplingToolsCapability
-except ImportError:
-    SamplingToolsCapability = _CompatType
-
-try:
-    from mcp.types import ToolUseContent
-except ImportError:
-    ToolUseContent = _CompatType
-
-from tools.mcp_tool import (
-    CreateMessageResultWithTools,
-    SamplingHandler,
-    SamplingToolsCapability,
-    ToolUseContent,
-    _safe_numeric,
+requires_mcp_sampling_types = pytest.mark.skipif(
+    not _MCP_SAMPLING_TYPES_AVAILABLE,
+    reason="MCP SDK sampling types not installed",
 )
 
 
@@ -2363,6 +2350,7 @@ class TestSafeNumeric:
 # 2. SamplingHandler initialization and config parsing
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestSamplingHandlerInit:
     def test_defaults(self):
         h = SamplingHandler("srv", {})
@@ -2406,6 +2394,7 @@ class TestSamplingHandlerInit:
 # 3. Rate limiting
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestRateLimit:
     def setup_method(self):
         self.handler = SamplingHandler("rl", {"max_rpm": 3})
@@ -2433,6 +2422,7 @@ class TestRateLimit:
 # 4. Model resolution
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestResolveModel:
     def setup_method(self):
         self.handler = SamplingHandler("mr", {})
@@ -2462,6 +2452,7 @@ class TestResolveModel:
 # 5. Message conversion
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestConvertMessages:
     def setup_method(self):
         self.handler = SamplingHandler("mc", {})
@@ -2554,6 +2545,7 @@ class TestConvertMessages:
 # 6. Text-only sampling callback (full flow)
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestSamplingCallbackText:
     def setup_method(self):
         self.handler = SamplingHandler("txt", {})
@@ -2644,6 +2636,7 @@ class TestSamplingCallbackText:
 # 7. Tool use sampling callback
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestSamplingCallbackToolUse:
     def setup_method(self):
         self.handler = SamplingHandler("tu", {})
@@ -2696,6 +2689,7 @@ class TestSamplingCallbackToolUse:
 # 8. Tool loop governance
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestToolLoopGovernance:
     def test_max_tool_rounds_enforcement(self):
         """After max_tool_rounds consecutive tool responses, an error is returned."""
@@ -2763,6 +2757,7 @@ class TestToolLoopGovernance:
 # 9. Error paths: rate limit, timeout, no provider
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestSamplingErrors:
     def test_rate_limit_error(self):
         handler = SamplingHandler("rle", {"max_rpm": 1})
@@ -2875,6 +2870,7 @@ class TestSamplingErrors:
 # 10. Model whitelist
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestModelWhitelist:
     def test_allowed_model_passes(self):
         handler = SamplingHandler("wl", {"allowed_models": ["gpt-4o", "test-model"]})
@@ -2918,6 +2914,7 @@ class TestModelWhitelist:
 # 11. Malformed tool_call arguments
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestMalformedToolCallArgs:
     def test_invalid_json_wrapped_as_raw(self):
         """Malformed JSON arguments get wrapped in {"_raw": ...}."""
@@ -2969,6 +2966,7 @@ class TestMalformedToolCallArgs:
 # 12. Metrics tracking
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestMetricsTracking:
     def test_request_and_token_metrics(self):
         handler = SamplingHandler("met", {})
@@ -3016,6 +3014,7 @@ class TestMetricsTracking:
 # 13. session_kwargs()
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestSessionKwargs:
     def test_returns_correct_keys(self):
         handler = SamplingHandler("sk", {})
@@ -3036,6 +3035,7 @@ class TestSessionKwargs:
 # 14. MCPServerTask integration
 # ---------------------------------------------------------------------------
 
+@requires_mcp_sampling_types
 class TestMCPServerTaskSamplingIntegration:
     def test_sampling_handler_created_when_enabled(self):
         """MCPServerTask.run() creates a SamplingHandler when sampling is enabled."""
