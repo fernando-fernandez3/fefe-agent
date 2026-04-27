@@ -92,6 +92,7 @@ class DesiredStateSweep:
         action_planner: ActionPlanner | None = None,
         review_notifier: ReviewNotifier | None = None,
         max_actions_per_tick: int = DEFAULT_MAX_ACTIONS_PER_TICK,
+        allowed_domains: list[str] | tuple[str, ...] | set[str] | None = None,
     ):
         self.store = store
         self.sensor_registry = sensor_registry
@@ -102,6 +103,11 @@ class DesiredStateSweep:
         self.action_planner = action_planner or self._default_action_planner
         self.review_notifier = review_notifier
         self.max_actions_per_tick = max(1, int(max_actions_per_tick))
+        self.allowed_domains = {
+            str(domain).strip()
+            for domain in (allowed_domains or [])
+            if str(domain).strip()
+        }
         self._lock = threading.Lock()
 
     def run(self) -> SweepResult:
@@ -118,6 +124,10 @@ class DesiredStateSweep:
         result = SweepResult(status="ok")
         try:
             active_goals = self.store.list_goals(status=GoalStatus.ACTIVE)
+            if self.allowed_domains:
+                active_goals = [
+                    goal for goal in active_goals if goal.domain in self.allowed_domains
+                ]
         except Exception as exc:
             logger.exception("desired_state_sweep: failed to load active goals")
             return SweepResult(status="error", errors=[f"load_goals_failed: {exc}"])
@@ -161,6 +171,9 @@ class DesiredStateSweep:
         if result.actions_taken == 0 and not result.errors:
             result.status = "considered_no_action"
         return result
+
+    def _domain_allowed(self, domain: str) -> bool:
+        return not self.allowed_domains or domain in self.allowed_domains
 
     def _collect_goal_signals(self, goal: Goal, *, errors: list[str]) -> list[Signal]:
         try:
@@ -220,6 +233,13 @@ class DesiredStateSweep:
 
         persisted: list[Signal] = []
         for emitted in sensor_result.signals:
+            if not self._domain_allowed(emitted.domain):
+                logger.warning(
+                    "desired_state_sweep: ignoring signal %s from disallowed domain %s",
+                    emitted.id,
+                    emitted.domain,
+                )
+                continue
             try:
                 unique_id = f"{emitted.id}:{uuid4().hex[:8]}"
                 stored = self.store.append_signal(
@@ -334,6 +354,14 @@ class DesiredStateSweep:
     def _decide_and_execute(
         self, *, goal: Goal, opportunity: Opportunity
     ) -> SweepActionOutcome:
+        if not self._domain_allowed(opportunity.domain):
+            return SweepActionOutcome(
+                opportunity_id=opportunity.id,
+                goal_id=goal.id,
+                status="blocked",
+                blocked_reason=f"domain_not_allowed:{opportunity.domain}",
+            )
+
         proposed_actions = self.action_planner(opportunity)
         if not proposed_actions:
             return SweepActionOutcome(

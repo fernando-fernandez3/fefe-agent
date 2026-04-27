@@ -954,6 +954,25 @@ DEFAULT_CONFIG = {
         },
     },
 
+    "autonomy": {
+        "enabled": False,
+        "mode": "desired_state",
+        "tick_interval_minutes": 15,
+        "max_actions_per_tick": 3,
+        "allowed_domains": ["code_projects"],
+        "telegram_reviews_enabled": True,
+        "fallback_to_legacy_on_error": True,
+        "autoworkflow": {
+            "base_url": "http://127.0.0.1:8882",
+            "api_token": "",
+        },
+        "daily_digest": {
+            "enabled": False,
+            "delivery_time": "08:00",
+            "channel": "telegram",
+        },
+    },
+
     "cron": {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
@@ -2416,7 +2435,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
-    "sessions",
+    "sessions", "autonomy",
 }
 
 # Valid fields inside a custom_providers list entry

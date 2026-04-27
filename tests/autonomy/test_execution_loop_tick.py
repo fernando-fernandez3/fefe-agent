@@ -223,7 +223,7 @@ def test_execution_loop_executes_codex_task_for_failing_tests_signal(tmp_path):
     assert execution.executor_type == 'codex_executor'
     assert execution.plan['action'] == 'codex_task'
     assert execution.plan['codex_prompt_summary']
-    assert 'Investigate failing test slice' in execution.outcome['prompt']
+    assert 'Investigate failing tests:' in execution.outcome['prompt']
     store.close()
 
 
