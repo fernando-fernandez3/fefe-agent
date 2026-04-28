@@ -61,21 +61,63 @@ class AutonomyExecutionLoop:
         self.review_notifier = review_notifier
 
     def execute_review(self, *, review_id: str) -> 'Execution':
-        review = self.store.resolve_review(review_id, ReviewStatus.APPROVED)
+        existing_review = self.store.get_review(review_id)
+        if existing_review.status == ReviewStatus.APPROVED:
+            existing_execution = self.store.get_execution(existing_review.execution_id)
+            if existing_execution.status != ExecutionStatus.PENDING:
+                return existing_execution
+            review = existing_review
+        elif existing_review.status == ReviewStatus.PENDING:
+            review = self.store.resolve_review(review_id, ReviewStatus.APPROVED)
+        else:
+            raise RuntimeError(f'Review {review_id} is already {existing_review.status.value}')
         execution = self.store.get_execution(review.execution_id)
         primary_action = self._primary_action(execution.plan)
+        if primary_action == 'review_only':
+            prepared_execution = self.store.prepare_execution_for_review_approval(
+                execution.id,
+                executor_type='review_only',
+                plan=execution.plan,
+            )
+            if prepared_execution.status != ExecutionStatus.PENDING:
+                return prepared_execution
+            lease_owner = 'review_only-approval'
+            lease_expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+            self.store.claim_execution(prepared_execution.id, lease_owner=lease_owner, lease_expires_at=lease_expires_at)
+            completed = self.store.complete_execution(
+                prepared_execution.id,
+                lease_owner=lease_owner,
+                verification={'review_id': review.id},
+                outcome={'status': 'review_only_approved'},
+            )
+            self._update_execution_opportunity_status(completed, OpportunityStatus.COMPLETED)
+            return completed
         executor_type = self._executor_type_for_action(primary_action)
         prepared_execution = self.store.prepare_execution_for_review_approval(
             execution.id,
             executor_type=executor_type,
             plan=execution.plan,
         )
-        return self._execute_existing_execution(prepared_execution)
+        if prepared_execution.status != ExecutionStatus.PENDING:
+            return prepared_execution
+        self._update_execution_opportunity_status(prepared_execution, OpportunityStatus.IN_PROGRESS)
+        finalized = self._execute_existing_execution(prepared_execution)
+        self._update_execution_opportunity_status(
+            finalized,
+            OpportunityStatus.COMPLETED if finalized.status == ExecutionStatus.COMPLETED else OpportunityStatus.FAILED,
+        )
+        return finalized
 
     def reject_review(self, *, review_id: str, reason: str = '') -> 'Review':
+        existing_review = self.store.get_review(review_id)
+        if existing_review.status == ReviewStatus.REJECTED:
+            return existing_review
+        if existing_review.status != ReviewStatus.PENDING:
+            raise RuntimeError(f'Review {review_id} is already {existing_review.status.value}')
         review = self.store.resolve_review(review_id, ReviewStatus.REJECTED)
         outcome = {'reason': reason} if reason else {'reason': 'review_rejected'}
-        self.store.cancel_execution(review.execution_id, outcome=outcome)
+        execution = self.store.cancel_execution(review.execution_id, outcome=outcome)
+        self._update_execution_opportunity_status(execution, OpportunityStatus.SUPPRESSED)
         return review
 
     def tick(self, *, domain: str, repo_path: Path | None = None, metadata: dict | None = None) -> TickResult:
@@ -138,6 +180,7 @@ class AutonomyExecutionLoop:
                     'evidence': opportunity.evidence,
                 },
             )
+            self.store.update_opportunity_status(opportunity.id, OpportunityStatus.REVIEW_REQUIRED)
             if self.review_notifier is not None:
                 self.review_notifier(review.id)
             return TickResult(
@@ -170,6 +213,10 @@ class AutonomyExecutionLoop:
             plan=execution_plan,
         )
         finalized_execution = self._execute_existing_execution(execution, task_payload=task_payload, repo_path=repo_path)
+        self._update_execution_opportunity_status(
+            finalized_execution,
+            OpportunityStatus.COMPLETED if finalized_execution.status == ExecutionStatus.COMPLETED else OpportunityStatus.FAILED,
+        )
 
         if finalized_execution.status == ExecutionStatus.FAILED:
             learning = self.learning_engine.extract_and_persist(
@@ -233,6 +280,8 @@ class AutonomyExecutionLoop:
     ) -> tuple[Opportunity, PolicyDecision, list[str]] | None:
         review_candidate: tuple[Opportunity, PolicyDecision, list[str]] | None = None
         for opportunity in opportunities:
+            if opportunity is None or opportunity.status != OpportunityStatus.OPEN:
+                continue
             proposed_actions = self.action_planner(opportunity)
             if not proposed_actions:
                 continue
@@ -246,6 +295,14 @@ class AutonomyExecutionLoop:
             if decision.requires_review and review_candidate is None:
                 review_candidate = (opportunity, decision, proposed_actions)
         return review_candidate
+
+    def _update_execution_opportunity_status(self, execution: Execution, status: OpportunityStatus) -> None:
+        if not execution.opportunity_id:
+            return
+        try:
+            self.store.update_opportunity_status(execution.opportunity_id, status)
+        except KeyError:
+            return
 
     def _execute_existing_execution(
         self,
