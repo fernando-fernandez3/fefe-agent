@@ -581,6 +581,8 @@ def _load_autonomy_runtime_config() -> dict[str, Any]:
         "fallback_to_legacy_on_error": is_truthy_value(
             section.get("fallback_to_legacy_on_error", True)
         ),
+        "telegram_chat_id": str(section.get("telegram_chat_id") or "").strip(),
+        "review_chat_id": str(section.get("review_chat_id") or "").strip(),
         "autoworkflow_base_url": autoworkflow_base_url,
         "autoworkflow_api_token": autoworkflow_api_token,
         "daily_digest": {
@@ -589,6 +591,7 @@ def _load_autonomy_runtime_config() -> dict[str, Any]:
             or "08:00",
             "channel": str(daily_digest.get("channel") or "telegram").strip()
             or "telegram",
+            "chat_id": str(daily_digest.get("chat_id") or "").strip(),
         },
     }
 
@@ -1334,16 +1337,50 @@ class GatewayRunner:
             if should_close:
                 store.close()
 
+    def _autonomy_telegram_target_chat_id(
+        self, *, purpose: str, source: SessionSource | None = None
+    ) -> str | None:
+        cfg = self._autonomy_config()
+        digest_cfg = cfg.get("daily_digest") or {}
+        candidates: list[str | None] = []
+        if purpose == "digest":
+            candidates.extend(
+                [
+                    digest_cfg.get("chat_id"),
+                    cfg.get("telegram_chat_id"),
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    cfg.get("review_chat_id"),
+                    cfg.get("telegram_chat_id"),
+                    digest_cfg.get("chat_id"),
+                ]
+            )
+            if source is not None and source.platform == Platform.TELEGRAM:
+                candidates.append(source.chat_id)
+
+        for candidate in candidates:
+            chat_id = str(candidate or "").strip()
+            if chat_id:
+                return chat_id
+
+        home = self.config.get_home_channel(Platform.TELEGRAM)
+        if home is not None and home.chat_id:
+            return home.chat_id
+        return None
+
     async def _deliver_daily_digest(self, message: str, *, channel: str) -> bool:
         if channel != "telegram":
             return False
         adapter = self.adapters.get(Platform.TELEGRAM)
         if adapter is None:
             return False
-        home = self.config.get_home_channel(Platform.TELEGRAM)
-        if home is None or not home.chat_id:
+        target_chat_id = self._autonomy_telegram_target_chat_id(purpose="digest")
+        if not target_chat_id:
             return False
-        await adapter.send(home.chat_id, message)
+        await adapter.send(target_chat_id, message)
         return True
 
     async def _notify_autonomy_review_created(
@@ -1356,10 +1393,9 @@ class GatewayRunner:
         if adapter is None:
             return
 
-        home = self.config.get_home_channel(Platform.TELEGRAM)
-        target_chat_id = home.chat_id if home is not None else None
-        if not target_chat_id and source is not None and source.platform == Platform.TELEGRAM:
-            target_chat_id = source.chat_id
+        target_chat_id = self._autonomy_telegram_target_chat_id(
+            purpose="review", source=source
+        )
         if not target_chat_id:
             return
 
@@ -1395,6 +1431,66 @@ class GatewayRunner:
             },
             review_notifier=_notify,
         )
+
+    async def _approve_autonomy_review(self, review_id: str):
+        from autonomy.store import AutonomyStore
+
+        store = AutonomyStore()
+        try:
+            loop = self._build_gateway_autonomy_execution_loop(store=store)
+            return await asyncio.to_thread(loop.execute_review, review_id=review_id)
+        finally:
+            store.close()
+
+    async def _reject_autonomy_review(self, review_id: str, reason: str):
+        from autonomy.store import AutonomyStore
+
+        store = AutonomyStore()
+        try:
+            loop = self._build_gateway_autonomy_execution_loop(store=store)
+            return await asyncio.to_thread(
+                loop.reject_review,
+                review_id=review_id,
+                reason=reason,
+            )
+        finally:
+            store.close()
+
+    @staticmethod
+    def _status_value(obj: Any) -> str:
+        status = getattr(obj, "status", "")
+        return str(getattr(status, "value", status) or "unknown")
+
+    async def _handle_review_approve_command(self, event: MessageEvent) -> str:
+        review_id = event.get_command_args().strip()
+        if not review_id:
+            return "Usage: /review-approve <review_id>"
+        try:
+            execution = await self._approve_autonomy_review(review_id)
+        except KeyError:
+            return f"Review not found: {review_id}"
+        except Exception as exc:
+            logger.exception("Failed to approve autonomy review %s", review_id)
+            return f"Failed to approve {review_id}: {exc}"
+        status = self._status_value(execution)
+        executor_type = getattr(execution, "executor_type", "unknown")
+        return f"Approved {review_id}. Execution {getattr(execution, 'id', '')} {status} via {executor_type}."
+
+    async def _handle_review_reject_command(self, event: MessageEvent) -> str:
+        args = event.get_command_args().strip()
+        if not args:
+            return "Usage: /review-reject <review_id> [reason]"
+        review_id, _, reason = args.partition(" ")
+        reason = reason.strip()
+        try:
+            review = await self._reject_autonomy_review(review_id, reason)
+        except KeyError:
+            return f"Review not found: {review_id}"
+        except Exception as exc:
+            logger.exception("Failed to reject autonomy review %s", review_id)
+            return f"Failed to reject {review_id}: {exc}"
+        status = self._status_value(review)
+        return f"Rejected {review_id}. Review status: {status}."
 
     def _resolve_session_agent_runtime(
         self,
@@ -4121,6 +4217,11 @@ class GatewayRunner:
                     return await self._handle_approve_command(event)
                 return await self._handle_deny_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name in ("review-approve", "review-reject"):
+                if _cmd_def_inner.name == "review-approve":
+                    return await self._handle_review_approve_command(event)
+                return await self._handle_review_reject_command(event)
+
             # /agents (/tasks alias) should be query-only and never interrupt.
             if _cmd_def_inner and _cmd_def_inner.name == "agents":
                 return await self._handle_agents_command(event)
@@ -4400,6 +4501,12 @@ class GatewayRunner:
 
         if canonical == "deny":
             return await self._handle_deny_command(event)
+
+        if canonical == "review-approve":
+            return await self._handle_review_approve_command(event)
+
+        if canonical == "review-reject":
+            return await self._handle_review_reject_command(event)
 
         if canonical == "update":
             return await self._handle_update_command(event)

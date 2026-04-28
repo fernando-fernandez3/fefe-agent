@@ -91,6 +91,7 @@ def test_load_autonomy_runtime_config_parses_desired_state_options(monkeypatch):
         "enabled": True,
         "delivery_time": "09:30",
         "channel": "telegram",
+        "chat_id": "",
     }
 
 
@@ -362,6 +363,95 @@ async def test_notify_autonomy_review_created_respects_telegram_gate(monkeypatch
     await runner._notify_autonomy_review_created("review_2")
 
     assert adapter.sent == [("chat-1", "packet review_2", {})]
+
+
+@pytest.mark.asyncio
+async def test_notify_autonomy_review_created_prefers_configured_autonomy_chat(monkeypatch):
+    import gateway.autonomy_review as autonomy_review
+
+    adapter = _CaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.config = SimpleNamespace(
+        get_home_channel=lambda platform: HomeChannel(
+            platform=platform,
+            chat_id="dm-home",
+            name="home",
+        )
+    )
+    runner._autonomy_config = lambda: {
+        "telegram_reviews_enabled": True,
+        "daily_digest": {"chat_id": "group-chat"},
+    }
+    monkeypatch.setattr(
+        autonomy_review,
+        "format_review_notification",
+        lambda review_id: f"packet {review_id}",
+    )
+
+    await runner._notify_autonomy_review_created("review_2")
+
+    assert adapter.sent == [("group-chat", "packet review_2", {})]
+
+
+@pytest.mark.asyncio
+async def test_deliver_daily_digest_prefers_configured_digest_chat():
+    adapter = _CaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.config = SimpleNamespace(
+        get_home_channel=lambda platform: HomeChannel(
+            platform=platform,
+            chat_id="dm-home",
+            name="home",
+        )
+    )
+    runner._autonomy_config = lambda: {
+        "telegram_chat_id": "autonomy-chat",
+        "daily_digest": {"chat_id": "digest-chat"},
+    }
+
+    delivered = await runner._deliver_daily_digest("digest", channel="telegram")
+
+    assert delivered is True
+    assert adapter.sent == [("digest-chat", "digest", {})]
+
+
+@pytest.mark.asyncio
+async def test_review_approve_command_executes_review(monkeypatch):
+    calls = []
+    runner = object.__new__(GatewayRunner)
+
+    async def fake_approve(review_id):
+        calls.append(review_id)
+        return SimpleNamespace(id="exec-1", status="completed", executor_type="codex_executor")
+
+    runner._approve_autonomy_review = fake_approve
+    event = SimpleNamespace(get_command_args=lambda: "review_1")
+
+    result = await runner._handle_review_approve_command(event)
+
+    assert calls == ["review_1"]
+    assert "Approved review_1" in result
+    assert "completed" in result
+
+
+@pytest.mark.asyncio
+async def test_review_reject_command_rejects_with_reason(monkeypatch):
+    calls = []
+    runner = object.__new__(GatewayRunner)
+
+    async def fake_reject(review_id, reason):
+        calls.append((review_id, reason))
+        return SimpleNamespace(id=review_id, status="rejected")
+
+    runner._reject_autonomy_review = fake_reject
+    event = SimpleNamespace(get_command_args=lambda: "review_1 not worth it")
+
+    result = await runner._handle_review_reject_command(event)
+
+    assert calls == [("review_1", "not worth it")]
+    assert "Rejected review_1" in result
 
 
 def test_cron_ticker_invokes_autonomy_tick(monkeypatch):
