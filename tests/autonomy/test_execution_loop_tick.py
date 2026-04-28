@@ -2,7 +2,7 @@ from pathlib import Path
 
 from autonomy.execution_loop import AutonomyExecutionLoop
 from autonomy.executors.base import BaseExecutor, ExecutionResult, ExecutionTask
-from autonomy.models import ExecutionStatus, Signal
+from autonomy.models import ExecutionStatus, OpportunityStatus, Signal
 from autonomy.sensors.base import BaseSensor, SensorContext, SensorResult
 from autonomy.store import AutonomyStore
 
@@ -224,6 +224,42 @@ def test_execution_loop_executes_codex_task_for_failing_tests_signal(tmp_path):
     assert execution.plan['action'] == 'codex_task'
     assert execution.plan['codex_prompt_summary']
     assert 'Investigate failing tests:' in execution.outcome['prompt']
+    store.close()
+
+
+def test_execution_loop_does_not_reopen_suppressed_opportunity_or_create_new_review(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    seed_goal_and_policy(store, approval_required_for=['inspect_repo'])
+    repo_path = tmp_path / 'repo'
+    repo_path.mkdir()
+    opportunity_id = f'opp::code_projects::dirty_worktree::{repo_path}'
+    store.upsert_opportunity(
+        opportunity_id=opportunity_id,
+        domain='code_projects',
+        source_sensor='dirty_repo_sensor',
+        title='Inspect dirty repo',
+        score=0.8,
+        risk_level='low',
+        confidence=0.8,
+        urgency=0.5,
+        expected_value=0.5,
+        context_cost=0.1,
+        status=OpportunityStatus.SUPPRESSED,
+    )
+
+    loop = AutonomyExecutionLoop(
+        store=store,
+        sensors=[DirtyRepoSensor()],
+        executors={'repo_executor': SuccessfulInspectExecutor()},
+    )
+
+    result = loop.tick(domain='code_projects', repo_path=repo_path)
+
+    opportunity = store.get_opportunity(opportunity_id)
+    assert result.status == 'blocked_no_allowed_opportunity'
+    assert result.review_id is None
+    assert opportunity.status == OpportunityStatus.SUPPRESSED
+    assert store.list_pending_reviews(domain='code_projects') == []
     store.close()
 
 

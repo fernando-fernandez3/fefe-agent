@@ -512,11 +512,14 @@ class AutonomyStore:
                 expected_value = excluded.expected_value,
                 context_cost = excluded.context_cost,
                 score = excluded.score,
-                status = excluded.status,
                 evidence_json = excluded.evidence_json,
                 delegation_mode = excluded.delegation_mode,
                 delegation_target = excluded.delegation_target,
                 desired_outcome = excluded.desired_outcome,
+                status = CASE
+                    WHEN opportunities.status = 'open' THEN excluded.status
+                    ELSE opportunities.status
+                END,
                 updated_at = excluded.updated_at
             """,
             (
@@ -541,6 +544,15 @@ class AutonomyStore:
                 now,
             ),
         )
+        return self.get_opportunity(opportunity_id)
+
+    def update_opportunity_status(self, opportunity_id: str, status: OpportunityStatus) -> Opportunity:
+        cur = self.db.execute(
+            'UPDATE opportunities SET status = ?, updated_at = ? WHERE id = ?',
+            (status.value, utc_now_iso(), opportunity_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f'Opportunity not found: {opportunity_id}')
         return self.get_opportunity(opportunity_id)
 
     def get_opportunity(self, opportunity_id: str) -> Opportunity:
@@ -733,17 +745,21 @@ class AutonomyStore:
             SET executor_type = ?, status = ?, review_required = 0,
                 plan_json = ?, verification_json = '{}', outcome_json = '{}',
                 started_at = NULL, completed_at = NULL, lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = ?
+            WHERE id = ? AND status = ? AND review_required = 1
             """,
             (
                 executor_type,
                 ExecutionStatus.PENDING.value,
                 json.dumps(plan or {}),
                 execution_id,
+                ExecutionStatus.PENDING.value,
             ),
         )
         if cur.rowcount == 0:
-            raise KeyError(f'Execution not found: {execution_id}')
+            existing = self.get_execution(execution_id)
+            if existing.review_required or existing.status == ExecutionStatus.CANCELLED:
+                raise RuntimeError(f'Execution cannot be prepared for review approval: {execution_id}')
+            return existing
         return self.get_execution(execution_id)
 
     def cancel_execution(self, execution_id: str, *, outcome: dict | None = None) -> Execution:
@@ -752,17 +768,18 @@ class AutonomyStore:
             UPDATE executions
             SET status = ?, outcome_json = ?, completed_at = ?,
                 lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = ?
+            WHERE id = ? AND status != ?
             """,
             (
                 ExecutionStatus.CANCELLED.value,
                 json.dumps(outcome or {}),
                 utc_now_iso(),
                 execution_id,
+                ExecutionStatus.CANCELLED.value,
             ),
         )
         if cur.rowcount == 0:
-            raise KeyError(f'Execution not found: {execution_id}')
+            return self.get_execution(execution_id)
         return self.get_execution(execution_id)
 
     def create_review(
@@ -874,10 +891,15 @@ class AutonomyStore:
         if status not in {ReviewStatus.APPROVED, ReviewStatus.REJECTED, ReviewStatus.EXPIRED, ReviewStatus.CANCELLED}:
             raise ValueError(f'Invalid terminal review status: {status}')
         resolved_at = utc_now_iso()
-        self.db.execute(
-            'UPDATE reviews SET status = ?, resolved_at = ? WHERE id = ?',
-            (status.value, resolved_at, review_id),
+        cur = self.db.execute(
+            'UPDATE reviews SET status = ?, resolved_at = ? WHERE id = ? AND status = ?',
+            (status.value, resolved_at, review_id, ReviewStatus.PENDING.value),
         )
+        if cur.rowcount == 0:
+            review = self.get_review(review_id)
+            if review.status == status:
+                return review
+            raise RuntimeError(f'Review {review_id} is already {review.status.value}')
         return self.get_review(review_id)
 
     def create_daily_digest(
