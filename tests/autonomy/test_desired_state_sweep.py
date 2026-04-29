@@ -3,7 +3,7 @@ from autonomy.executors.base import BaseExecutor, ExecutionResult, ExecutionTask
 from autonomy.sensors.base import BaseSensor, SensorContext, SensorResult
 from autonomy.sensors.registry import SensorRegistry
 from autonomy.store import AutonomyStore
-from autonomy.models import Signal
+from autonomy.models import OpportunityStatus, Signal
 
 
 class LocatorSignalSensor(BaseSensor):
@@ -113,6 +113,67 @@ def test_desired_state_sweep_executes_high_priority_goal_first_and_persists_rank
     assert high.evidence['ranking']['weighted_score'] > low.evidence['ranking']['weighted_score']
     assert high.evidence['ranking']['opportunity_score'] == high.score
     assert high.evidence['ranking']['urgency'] == high.urgency
+    store.close()
+
+
+def test_desired_state_sweep_skips_suppressed_opportunities_from_recurring_signals(tmp_path):
+    store = AutonomyStore(tmp_path / 'autonomy.db')
+    store.create_policy(
+        policy_id='policy_code_projects',
+        domain='code_projects',
+        trust_level=1,
+        allowed_actions=['inspect_repo'],
+        approval_required_for=['inspect_repo'],
+    )
+    seed_goal_policy_and_entry(store, goal_id='goal_suppressed', priority=100, locator='/repo/suppressed')
+    store.upsert_opportunity(
+        opportunity_id='opp::code_projects::dirty_worktree::/repo/suppressed',
+        domain='code_projects',
+        source_sensor='locator_signal_sensor',
+        title='Suppressed dirty repo',
+        score=0.7,
+        risk_level='low',
+        confidence=0.7,
+        urgency=0.5,
+        expected_value=0.5,
+        context_cost=0.1,
+        status=OpportunityStatus.SUPPRESSED,
+        evidence={'repo_path': '/repo/suppressed'},
+    )
+    registry = SensorRegistry(
+        {
+            'repo': LocatorSignalSensor(
+                {
+                    '/repo/suppressed': Signal(
+                        id='sig_suppressed',
+                        domain='code_projects',
+                        source_sensor='locator_signal_sensor',
+                        entity_type='repo',
+                        entity_key='/repo/suppressed',
+                        signal_type='dirty_worktree',
+                        signal_strength=0.7,
+                        evidence={'repo_path': '/repo/suppressed'},
+                    )
+                }
+            )
+        }
+    )
+    notified: list[str] = []
+    sweep = DesiredStateSweep(
+        store=store,
+        sensor_registry=registry,
+        executors={'repo_executor': RecordingExecutor()},
+        review_notifier=notified.append,
+    )
+
+    result = sweep.run()
+
+    assert result.status == 'idle_no_opportunities'
+    assert result.actions == []
+    assert notified == []
+    assert store.list_pending_reviews(domain='code_projects') == []
+    opportunity = store.get_opportunity('opp::code_projects::dirty_worktree::/repo/suppressed')
+    assert opportunity.status == OpportunityStatus.SUPPRESSED
     store.close()
 
 

@@ -27,6 +27,7 @@ from autonomy.models import (
     GoalMatrixEntry,
     GoalStatus,
     Opportunity,
+    OpportunityStatus,
     Signal,
 )
 from autonomy.opportunity_engine import OpportunityEngine
@@ -296,6 +297,8 @@ class DesiredStateSweep:
                     errors.append(f"opportunity_upsert_failed:{signal.id}:{exc}")
                     continue
                 if opportunity is None:
+                    continue
+                if opportunity.status != OpportunityStatus.OPEN:
                     continue
                 weighted = self._weighted_score(goal=goal, opportunity=opportunity)
                 opportunity = self._persist_ranking_inputs(
