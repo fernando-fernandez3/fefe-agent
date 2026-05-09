@@ -1138,7 +1138,7 @@ class TestRunJobSessionPersistence:
 
         assert success is False
         assert final_response == ""
-        assert error == "Agent failure: Context length exceeded (72,000 tokens). Cannot compress further."
+        assert error == "RuntimeError: Context length exceeded (72,000 tokens). Cannot compress further."
         assert "# Cron Job: billing fallback (FAILED)" in output
         assert "## Error" in output
         assert error in output

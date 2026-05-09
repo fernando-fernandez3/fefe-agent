@@ -3200,12 +3200,12 @@ class AIAgent:
             self.model,
             f"{self.context_compressor.context_length:,}",
         )
-        if not self.quiet_mode:
-            label = "Preflight" if reason == "preflight" else reason.replace("_", " ").capitalize()
-            self._safe_print(
-                f"📦 {label} compression: ~{preflight_tokens:,} tokens "
-                f">= {self.context_compressor.threshold_tokens:,} threshold"
-            )
+        label = "Preflight" if reason == "preflight" else reason.replace("_", " ").capitalize()
+        status_message = (
+            f"📦 {label} compression: ~{preflight_tokens:,} tokens "
+            f">= {self.context_compressor.threshold_tokens:,} threshold"
+        )
+        self._emit_status(status_message)
 
         compressed = False
         # May need multiple passes for very large sessions with small context
