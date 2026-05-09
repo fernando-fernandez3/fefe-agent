@@ -10,6 +10,14 @@ import yaml
 from agent import i18n
 
 
+@pytest.fixture(autouse=True)
+def reset_i18n_cache_between_tests():
+    """Avoid fake locale catalogs leaking into unrelated tests on the same worker."""
+    i18n.reset_language_cache()
+    yield
+    i18n.reset_language_cache()
+
+
 LOCALES_DIR = Path(__file__).resolve().parents[2] / "locales"
 
 

@@ -316,8 +316,9 @@ class TestTencentTokenhubContextLength:
     def test_hy3_preview_has_registered_context_length(self):
         from agent.model_metadata import get_model_context_length
         ctx = get_model_context_length("hy3-preview")
-        assert isinstance(ctx, int)
-        assert ctx >= 4096, f"hy3-preview context length looks unset/wrong: {ctx}"
+        # OpenRouter/models.dev currently reports Hy3 as a 256Ki token window.
+        # Keep this as a behavioral floor instead of a brittle catalog snapshot.
+        assert ctx >= 256000
 
 
 # =============================================================================
