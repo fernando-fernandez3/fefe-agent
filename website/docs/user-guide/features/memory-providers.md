@@ -1,19 +1,19 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "Memory provider plugins — Long Memory, Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
 ```bash
 hermes memory setup      # interactive picker + configuration
 hermes memory status     # check what's active
-hermes memory off        # disable external provider
+hermes memory off        # disable memory provider
 ```
 
 You can also select the active memory provider via `hermes plugins` → Provider Plugins → Memory Provider.
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: long_memory   # or honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory
 ```
 
 ## How It Works
@@ -33,12 +33,25 @@ When a memory provider is active, Hermes automatically:
 2. **Prefetches relevant memories** before each turn (background, non-blocking)
 3. **Syncs conversation turns** to the provider after each response
 4. **Extracts memories on session end** (for providers that support it)
-5. **Mirrors built-in memory writes** to the external provider
+5. **Mirrors built-in memory writes** to the selected provider
 6. **Adds provider-specific tools** so the agent can search, store, and manage memories
 
-The built-in memory (MEMORY.md / USER.md) continues to work exactly as before. The external provider is additive.
+The built-in memory (MEMORY.md / USER.md) continues to work exactly as before. The selected provider is additive.
 
 ## Available Providers
+
+### Long Memory
+
+Native local long-form memory for dependency-free notes that are retrieved only when relevant. It stores notes under `$HERMES_HOME/long_memory/` with `notes.jsonl` as the durable source of truth and `index.sqlite3` as an optional SQLite FTS5 index.
+
+| | |
+|---|---|
+| **Best for** | Local episodic, source, project, and detailed user notes |
+| **Requires** | No API keys or extra dependencies |
+| **Data storage** | Profile-scoped local files |
+| **Cost** | Free |
+
+**Tools (3):** `long_memory_add`, `long_memory_search`, `long_memory_list`
 
 ### Honcho
 
