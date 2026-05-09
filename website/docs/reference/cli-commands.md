@@ -57,7 +57,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes pairing` | Approve or revoke messaging pairing codes. |
 | `hermes skills` | Browse, install, publish, audit, and configure skills. |
 | `hermes honcho` | Manage Honcho cross-session memory integration. |
-| `hermes memory` | Configure external memory provider. |
+| `hermes memory` | Configure memory provider. |
 | `hermes acp` | Run Hermes as an ACP server for editor integration. |
 | `hermes mcp` | Manage MCP server configurations and run Hermes as an MCP server. |
 | `hermes plugins` | Manage Hermes Agent plugins (install, enable, disable, remove). |
@@ -665,7 +665,7 @@ Subcommands:
 hermes memory <subcommand>
 ```
 
-Set up and manage external memory provider plugins. Available providers: honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory. Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
+Set up and manage memory provider plugins. Available providers: long_memory, honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory. Only one provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
 
 Subcommands:
 
@@ -673,7 +673,7 @@ Subcommands:
 |------------|-------------|
 | `setup` | Interactive provider selection and configuration. |
 | `status` | Show current memory provider config. |
-| `off` | Disable external provider (built-in only). |
+| `off` | Disable memory provider (built-in only). |
 
 ## `hermes acp`
 

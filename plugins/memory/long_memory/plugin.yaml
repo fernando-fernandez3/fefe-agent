@@ -1,0 +1,5 @@
+name: long_memory
+version: 0.1.0
+description: "Native local long-form memory with JSONL storage and optional SQLite FTS5 keyword retrieval."
+hooks:
+  - prefetch
